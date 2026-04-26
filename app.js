@@ -256,6 +256,7 @@ async function login(username, password){
 
   document.getElementById('loginOverlay').classList.add('hidden');
   document.getElementById('appShell').classList.remove('hidden');
+  console.log("LOGIN SUCCESS", currentUserId, state);
   renderApp();
 }
 function logout(){
