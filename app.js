@@ -214,10 +214,10 @@ async function login(username, password){
     return;
   }
 
- const loginRecord = (state.logins || []).find(item =>
-  item.active !== false &&
-  String(item.email || '').trim().toLowerCase() === safeUsername
-);
+const loginRecord = (state.logins || []).find(item => {
+  const itemEmail = String(item.email || fullEmail(item.username || '')).trim().toLowerCase();
+  return item.active !== false && itemEmail === safeUsername;
+});
 
   if(!loginRecord){
     setMessage(msg, 'warn', 'We could not find that email.');
