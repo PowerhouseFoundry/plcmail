@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PLC Mail</title>
+    <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="loginOverlay" class="overlay">
+    <div class="card narrow">
+      <div class="login-brand">
+  <img src="assets/plc-mail-logo.png" alt="PLC Mail" class="login-logo">
+ 
+</div>
+    
+      <div class="field"><label>Email address</label><input id="loginEmail" type="text" placeholder="teacher@plcmail.com"></div>
+      <div class="field"><label>Password</label><input id="loginPassword" type="password" placeholder="Password"></div>
+      <div class="row">
+        <button id="loginBtn" class="btn btn-primary">Sign in</button>
+        
+      </div>
+      <div id="loginMsg"></div>
+    </div>
+  </div>
+
+  <div id="modalOverlay" class="overlay hidden"><div id="modalCard" class="card"></div></div>
+
+  <div id="appShell" class="hidden">
+    <header class="topbar">
+      <div class="brand">
+  <img src="assets/plc-mail-logo.png" alt="PLC Mail" class="brand-logo">
+
+</div>
+      <label class="search"><span>🔎</span><input id="globalSearch" type="text" placeholder="Search mail"></label>
+      <div class="row">
+        <button id="topChangePw" class="btn-secondary">Change password</button>
+        <div id="avatar" class="avatar">PL</div>
+        <button id="logoutBtn" class="btn-secondary">Log out</button>
+      </div>
+    </header>
+
+    <div id="adminView" class="hidden">
+      <div class="layout-admin">
+        <aside id="adminSidebar" class="admin-sidebar"></aside>
+        <main id="adminMain" class="admin-main"></main>
+      </div>
+    </div>
+
+    <div id="mailView" class="hidden">
+      <div class="mail-layout">
+        <aside class="mail-sidebar">
+          <button id="newMailBtn" class="new-btn">New message</button>
+          <div class="folders">
+            <button class="folder-btn active" data-folder="inbox"><span class="folder-left"><span>📥</span><span>Inbox</span></span><span id="count-inbox" class="count">0</span></button>
+            <button class="folder-btn" data-folder="junk"><span class="folder-left"><span>🛡️</span><span>Junk Email</span></span><span id="count-junk" class="count">0</span></button>
+            <button class="folder-btn" data-folder="deleted"><span class="folder-left"><span>🗑️</span><span>Deleted Items</span></span><span id="count-deleted" class="count">0</span></button>
+            <button class="folder-btn" data-folder="sent"><span class="folder-left"><span>📤</span><span>Sent Items</span></span><span id="count-sent" class="count">0</span></button>
+            <button class="folder-btn" data-folder="templates">
+  <span class="folder-left"><span>🧩</span><span>Templates</span></span>
+  <span class="count">Library</span>
+</button>
+            <button class="folder-btn" data-folder="calendar"><span class="folder-left"><span>📅</span><span>Calendar</span></span><span class="count">7</span></button>
+          </div>
+          
+        </aside>
+        <section class="mail-list-panel">
+          <div class="mail-head"><div><h2 id="folderTitle">Inbox</h2><p><span id="messageCount">0</span> messages</p></div><button class="tool-btn">⋯</button></div>
+          <div id="mailList" class="mail-list"></div>
+        </section>
+        <main class="mail-reader">
+          <div class="toolbar">
+            <button id="replyBtn" class="tool-btn">↩ Reply</button>
+            <button id="forwardBtn" class="tool-btn">↪ Forward</button>
+            <button id="deleteBtn" class="tool-btn">🗑 Delete</button>
+            <button id="spamBtn" class="tool-btn">🚫 Mark as spam</button>
+            <button id="flagBtn" class="tool-btn">⚑ Report / flag</button>
+            <button id="hintBtn" class="tool-btn">💡 Hint</button>
+          </div>
+          <div class="reader-scroll"><div id="readerInner" class="reader-inner"></div></div>
+        </main>
+      </div>
+    </div>
+  </div>
+
+<script type="module" src="firebase-init.js"></script>
+<script type="module" src="app.js"></script>
+</body>
+</html>
