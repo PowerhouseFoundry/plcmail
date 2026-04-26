@@ -1805,9 +1805,9 @@ async function init(){
   ensureStateShape();
   await saveState();
   startFirestoreSync();
+  document.getElementById('loginEmail').value = '';
+document.getElementById('loginPassword').value = '';
 
-  document.getElementById('loginEmail').value = 'teacher';
-  document.getElementById('loginPassword').value = 'admin123';
 }
 
 function createInitialState(){
