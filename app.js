@@ -2459,22 +2459,23 @@ function openAttachment(mail, attId){
   let actions='<button id="closeAttBtn" class="btn-secondary">Close</button>';
 
   if(a.dataUrl && String(a.mimetype||'').startsWith('image/')){
-    preview = `
-      <div class="panel" style="padding:12px">
-        <img src="${a.dataUrl}" alt="${esc(a.filename)}" style="max-width:100%;border-radius:14px">
-      </div>
-    `;
+    preview=`<div class="panel" style="padding:12px">
+      <img src="${a.dataUrl}" alt="${esc(a.filename)}" style="max-width:100%;border-radius:14px">
+    </div>`;
+  }
+
+  if(a.dataUrl && String(a.mimetype||'').includes('pdf')){
+    preview=`<div class="panel" style="padding:0;overflow:hidden">
+      <iframe src="${a.dataUrl}" style="width:100%;height:70vh;border:none"></iframe>
+    </div>`;
   }
 
   if(a.dataUrl){
-    actions = `
-      <button id="downloadAttBtn" class="btn btn-primary">Download</button>
-      <button id="closeAttBtn" class="btn-secondary">Close</button>
-    `;
+    actions=`<button id="downloadAttBtn" class="btn btn-primary">Download</button>
+    <button id="closeAttBtn" class="btn-secondary">Close</button>`;
   }
 
-  openModal(`
-    <h2>Attachment</h2>
+  openModal(`<h2>Attachment</h2>
     <div class="stack">
       <div class="panel">
         <strong>${esc(a.filename)}</strong>
@@ -2482,21 +2483,18 @@ function openAttachment(mail, attId){
       </div>
       ${preview || '<div class="message ok">This attachment is available inside the local prototype.</div>'}
       <div class="row">${actions}</div>
-    </div>
-  `,'compact');
+    </div>`, 'compact');
 
   const close=document.getElementById('closeAttBtn');
   if(close) close.onclick=closeModal;
 
   const down=document.getElementById('downloadAttBtn');
-  if(down){
-    down.onclick=()=>{
-      const link=document.createElement('a');
-      link.href=a.dataUrl;
-      link.download=a.filename || 'attachment';
-      link.click();
-    };
-  }
+  if(down) down.onclick=()=>{
+    const link=document.createElement('a');
+    link.href=a.dataUrl;
+    link.download=a.filename||'attachment';
+    link.click();
+  };
 }
 function renderAdminSidebar(){
   const items=[['dashboard','Dashboard'],['classes','Classes'],['students','Students'],['staff','Staff'],['inbox','Inbox'],['calendar_admin','Calendar'],['send','Send Email'],['mailboxes','Student Mailboxes'],['settings','Settings']];
