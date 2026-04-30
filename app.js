@@ -1035,6 +1035,10 @@ function openTemplateSendModal(initialTemplateId=''){
           <div class="field">
             <label>Simulated attachment filenames</label>
             <input id="sendTplAttachments" type="text" placeholder="e.g. worksheet.pdf, poster.jpg">
+            <div class="field">
+  <label>Attach real PDF / files</label>
+  <input id="sendTplFiles" type="file" multiple accept=".pdf,image/*,.doc,.docx">
+</div>
           </div>
 
           <div class="soft-panel">
@@ -1131,11 +1135,11 @@ function openTemplateSendModal(initialTemplateId=''){
 
   root.querySelector('#sendTplCancel').onclick = closeModal;
 
-  root.querySelector('#sendTplSubmit').onclick = ()=>{
+  root.querySelector('#sendTplSubmit').onclick = async ()=>{
     const classId = classSelect.value;
     const folder = folderSelect.value;
     const template = state.templates.find(t=>t.id === templateSelect.value);
-    const attachments = parseAttachments(attachmentsInput.value);
+    const attachments = await collectFileAttachments('sendTplFiles', 'sendTplAttachments');
 
     let ids = [];
 
@@ -2370,6 +2374,14 @@ function formatBytes(n){
   if(num<1024) return num+' B';
   if(num<1024*1024) return Math.round(num/102.4)/10+' KB';
   return Math.round(num/1024/102.4)/10+' MB';
+}
+function fileToDataUrl(file){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
 }
 async function fileToAttachment(file){
   const obj={id:uid('att'), filename:file.name, filetype:(file.name.split('.').pop()||file.type||'FILE').toUpperCase(), size:formatBytes(file.size), mimetype:file.type||'application/octet-stream'};
