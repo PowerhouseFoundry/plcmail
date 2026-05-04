@@ -71,7 +71,7 @@ function isTeacherUser(){
 function className(id){ return state.classes.find(c=>c.id===id)?.name || ''; }
 function saveState(){
   removeOldAttachmentDataUrls();
-  removeOrphanLogins();
+  cleanDuplicateAccounts();
   ensureStateShape();
 
   const cleanState = clone(state);
@@ -91,6 +91,17 @@ function waitForPendingSave(){
   return saveQueue;
 }
 function fullEmail(username){ return username.includes('@') ? username : username + '@plcmail.com'; }
+function normaliseAccountEmail(value){
+  return String(value || '').trim().toLowerCase();
+}
+
+function loginEmailKey(login){
+  return normaliseAccountEmail(login.email || fullEmail(login.username || ''));
+}
+
+function userEmailKey(user){
+  return normaliseAccountEmail(user.email || fullEmail(user.username || ''));
+}
 function parseAttachments(text){ return String(text||'').split(',').map(s=>s.trim()).filter(Boolean).map(name=>({id:uid('att'), filename:name, filetype:(name.split('.').pop()||'FILE').toUpperCase(), size:'Local file'})); }
 function folderLabel(folder){ return folder==='junk'?'Junk Email':folder==='deleted'?'Deleted Items':folder==='sent'?'Sent Items':'Inbox'; }
 function userLabel(userId){ const u=getUser(userId); return u ? (u.displayName + ' (' + u.email + ')') : ''; }
@@ -168,19 +179,71 @@ function ensureStateShape(){
     
   });
 }
-function removeOrphanLogins(){
+function cleanDuplicateAccounts(){
   if(!state || !Array.isArray(state.users) || !Array.isArray(state.logins)) return;
 
-  const userIds = new Set(state.users.map(u => u.id));
+  const seenUserEmails = new Map();
+  const duplicateUserIds = new Set();
+
+  state.users.forEach(user => {
+    const email = userEmailKey(user);
+    if(!email) return;
+
+    if(seenUserEmails.has(email)){
+      const keeper = seenUserEmails.get(email);
+
+      console.warn('Removing duplicate user account:', {
+        duplicateUserId: user.id,
+        keeperUserId: keeper.id,
+        email
+      });
+
+      // Merge mailbox contents into the keeper account before removing duplicate.
+      if(state.mailboxes?.[user.id]){
+        if(!state.mailboxes[keeper.id]){
+          state.mailboxes[keeper.id] = { inbox:[], junk:[], deleted:[], sent:[] };
+        }
+
+        ['inbox', 'junk', 'deleted', 'sent'].forEach(folder => {
+          state.mailboxes[keeper.id][folder] = [
+            ...(state.mailboxes[keeper.id][folder] || []),
+            ...(state.mailboxes[user.id][folder] || [])
+          ];
+        });
+      }
+
+      duplicateUserIds.add(user.id);
+    } else {
+      seenUserEmails.set(email, user);
+    }
+  });
+
+  // Remove duplicate users.
+  state.users = state.users.filter(user => !duplicateUserIds.has(user.id));
+
+  duplicateUserIds.forEach(id => {
+    delete state.mailboxes[id];
+    delete state.events[id];
+  });
+
+  const validUserIds = new Set(state.users.map(u => u.id));
+  const seenLoginEmails = new Set();
 
   state.logins = state.logins.filter(login => {
-    const hasUser = userIds.has(login.userId);
+    const email = loginEmailKey(login);
 
-    if(!hasUser){
+    if(!validUserIds.has(login.userId)){
       console.warn('Removed orphan login with no matching user:', login);
+      return false;
     }
 
-    return hasUser;
+    if(seenLoginEmails.has(email)){
+      console.warn('Removed duplicate login for email:', email, login);
+      return false;
+    }
+
+    seenLoginEmails.add(email);
+    return true;
   });
 }
 function clone(data){
@@ -271,8 +334,23 @@ const loginRecord = (state.logins || []).find(item => {
     lastLogin: new Date().toLocaleString()
   };
 
-  if(existingIndex >= 0) state.users[existingIndex] = mergedUser;
-  else state.users.push(mergedUser);
+if(existingIndex >= 0){
+  state.users[existingIndex] = {
+    ...state.users[existingIndex],
+    lastLogin: new Date().toLocaleString()
+  };
+} else {
+  state.logins = (state.logins || []).filter(l => l.userId !== loginRecord.userId);
+  await saveState();
+
+  setMessage(
+    msg,
+    'warn',
+    'This login is linked to an old deleted account. Ask staff to create the student account again.'
+  );
+
+  return;
+}
 
   if(!state.mailboxes[currentUserId]){
     state.mailboxes[currentUserId] = { inbox:[], junk:[], deleted:[], sent:[] };
@@ -833,20 +911,31 @@ function adminUsers(role){ return state.users.filter(u=>u.role===role); }
 function groupTagClass(group){ return group==='Phishing / scam'?'phishing':group==='Spam / junk'?'spam':group==='Internal staff emails'?'internal':'safe'; }
 function deleteUserPermanently(userId){
   const deletedUser = getUser(userId);
+  const deletedEmail = deletedUser ? userEmailKey(deletedUser) : '';
 
-  state.users = state.users.filter(u => u.id !== userId);
+  const matchingUserIds = new Set(
+    state.users
+      .filter(u => u.id === userId || userEmailKey(u) === deletedEmail)
+      .map(u => u.id)
+  );
 
-  // IMPORTANT: remove the matching login too,
-  // otherwise the deleted student gets recreated when they log in.
-  state.logins = (state.logins || []).filter(l => l.userId !== userId);
+  state.users = state.users.filter(u => !matchingUserIds.has(u.id));
 
-  delete state.mailboxes[userId];
-  delete state.events[userId];
+  state.logins = (state.logins || []).filter(l => {
+    const sameUser = matchingUserIds.has(l.userId);
+    const sameEmail = deletedEmail && loginEmailKey(l) === deletedEmail;
+    return !sameUser && !sameEmail;
+  });
+
+  matchingUserIds.forEach(id => {
+    delete state.mailboxes[id];
+    delete state.events[id];
+  });
 
   state.automations = state.automations
     .map(auto => ({
       ...auto,
-      studentIds: (auto.studentIds || []).filter(id => id !== userId)
+      studentIds: (auto.studentIds || []).filter(id => !matchingUserIds.has(id))
     }))
     .filter(auto =>
       auto.kind === 'custom'
@@ -854,22 +943,22 @@ function deleteUserPermanently(userId){
         : ((auto.studentIds || []).length && (auto.kind === 'custom' || auto.templateId))
     );
 
-  state.activityLog = (state.activityLog || []).filter(a => a.userId !== userId);
+  state.activityLog = (state.activityLog || []).filter(a => !matchingUserIds.has(a.userId));
 
   Object.values(state.mailboxes || {}).forEach(box => {
     ['inbox', 'junk', 'deleted', 'sent'].forEach(folder => {
       box[folder] = (box[folder] || []).filter(mail =>
-        mail.senderId !== userId && mail.recipientId !== userId
+        !matchingUserIds.has(mail.senderId) && !matchingUserIds.has(mail.recipientId)
       );
     });
   });
 
-  if(selectedMailboxStudentId === userId) selectedMailboxStudentId = '';
+  if(matchingUserIds.has(selectedMailboxStudentId)) selectedMailboxStudentId = '';
 
-  console.log('Deleted user and login:', {
-    userId,
-    email: deletedUser?.email,
-    displayName: deletedUser?.displayName
+  console.log('Deleted user, duplicates and logins:', {
+    originalUserId: userId,
+    email: deletedEmail,
+    removedIds: Array.from(matchingUserIds)
   });
 
   saveState();
@@ -1937,7 +2026,8 @@ function migrateState(){
 async function init(){
   await loadInitialStateFromFirestore();
   ensureStateShape();
-  removeOrphanLogins();
+  cleanDuplicateAccounts();
+await saveState();
   startFirestoreSync();
   document.getElementById('loginEmail').value = '';
   document.getElementById('loginPassword').value = '';
