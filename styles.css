@@ -513,3 +513,127 @@
   color:var(--muted);
   margin-top:3px;
 }
+@media (max-width: 920px){
+  #appShell,
+  #mailView,
+  .mail-layout{
+    height: calc(100dvh - 61px - 64px);
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .mail-layout{
+    display: block;
+  }
+
+  .mail-list-panel,
+  .mail-reader{
+    height: 100%;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .student-mobile-mail-list .mail-list-panel{
+    display: block;
+  }
+
+  .student-mobile-mail-list .mail-reader{
+    display: none !important;
+  }
+
+  .student-mobile-mail-detail .mail-list-panel{
+    display: none !important;
+  }
+
+  .student-mobile-mail-detail .mail-reader{
+    display: flex !important;
+    flex-direction: column;
+  }
+
+  .student-mobile-calendar .mail-list-panel{
+    display: none !important;
+  }
+
+  .student-mobile-calendar .mail-reader{
+    display: flex !important;
+    flex-direction: column;
+  }
+
+  .mail-reader{
+    grid-template-rows: auto 1fr;
+  }
+
+  .reader-scroll{
+    flex: 1;
+    min-height: 0;
+    height: auto;
+    overflow-y: auto;
+    -webkit-overflow-scrolling: touch;
+    padding: 14px 12px 110px;
+  }
+
+  .reader-inner{
+    max-width: none;
+    width: 100%;
+    margin: 0;
+  }
+
+  .subject-line h1{
+    font-size: 22px;
+    line-height: 1.2;
+  }
+
+  .mail-body{
+    border-radius: 18px;
+    padding: 16px;
+    font-size: 15px;
+    line-height: 1.65;
+    overflow-wrap: anywhere;
+  }
+
+  .toolbar{
+    flex: 0 0 auto;
+    overflow-x: auto;
+    overflow-y: hidden;
+    white-space: nowrap;
+    flex-wrap: nowrap;
+  }
+}
+.mobile-compose-shortcut{
+  background: var(--blue);
+  color: #fff;
+  border: none;
+  white-space: nowrap;
+}
+
+.mobile-compose-shortcut:hover{
+  background: var(--blue2);
+}
+
+@media (max-width: 920px){
+  .mail-head{
+    min-height: 58px;
+    padding: 10px 12px;
+  }
+
+  .mail-head h2{
+    font-size: 12px;
+  }
+
+  .mobile-compose-shortcut{
+    border-radius: 999px;
+    padding: 9px 13px;
+    font-weight: 800;
+  }
+}
+.mobile-drawer-user{
+  border: none;
+  background: transparent;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  padding: 0;
+}

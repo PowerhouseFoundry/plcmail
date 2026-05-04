@@ -398,8 +398,8 @@ function allowedRecipients(user){
   return Array.from(map.values());
 }
 function isStudentMobile(){
-  const u=currentUser();
-  return !!u && u.role==='student' && window.innerWidth <= 768;
+  const u = currentUser();
+  return !!u && u.role === 'student' && window.innerWidth <= 920;
 }
 
 function mobileUnreadInboxCount(){
@@ -454,30 +454,30 @@ function renderMobileDrawer(){
   const user=currentUser();
   const counts=folderCounts(currentUserId);
 
-  drawer.innerHTML=`
-    <div class="mobile-drawer-head">
-      <div class="mobile-drawer-user">
-        <div class="mobile-drawer-avatar">${esc(initials(user.displayName))}</div>
-        <div>
-          <div style="font-weight:800">${esc(user.displayName)}</div>
-          <div class="muted" style="font-size:13px">${esc(user.email)}</div>
-        </div>
+drawer.innerHTML=`
+  <div class="mobile-drawer-head">
+    <button class="mobile-drawer-user" id="mobileDrawerUserBtn" type="button">
+      <div class="mobile-drawer-avatar">${esc(initials(user.displayName))}</div>
+      <div>
+        <div style="font-weight:800">${esc(user.displayName)}</div>
+        <div class="muted" style="font-size:13px">${esc(user.email)}</div>
       </div>
-    </div>
+    </button>
+  </div>
 
-    <div class="mobile-drawer-list">
-      <button class="mobile-drawer-btn ${mailFolder==='inbox'?'active':''}" data-mobile-folder="inbox"><span>Inbox</span><span class="count">${counts.inbox}</span></button>
-      <button class="mobile-drawer-btn ${mailFolder==='junk'?'active':''}" data-mobile-folder="junk"><span>Junk</span><span class="count">${counts.junk}</span></button>
-      <button class="mobile-drawer-btn ${mailFolder==='sent'?'active':''}" data-mobile-folder="sent"><span>Sent</span><span class="count">${counts.sent}</span></button>
-      <button class="mobile-drawer-btn ${mailFolder==='deleted'?'active':''}" data-mobile-folder="deleted"><span>Deleted</span><span class="count">${counts.deleted}</span></button>
-    </div>
+  <div class="mobile-drawer-list">
+    <button class="mobile-drawer-btn ${mailFolder==='inbox'?'active':''}" data-mobile-folder="inbox"><span>Inbox</span><span class="count">${counts.inbox}</span></button>
+    <button class="mobile-drawer-btn ${mailFolder==='junk'?'active':''}" data-mobile-folder="junk"><span>Junk</span><span class="count">${counts.junk}</span></button>
+    <button class="mobile-drawer-btn ${mailFolder==='sent'?'active':''}" data-mobile-folder="sent"><span>Sent</span><span class="count">${counts.sent}</span></button>
+    <button class="mobile-drawer-btn ${mailFolder==='deleted'?'active':''}" data-mobile-folder="deleted"><span>Deleted</span><span class="count">${counts.deleted}</span></button>
+  </div>
 
-    <div class="row" style="margin-top:18px">
-      <button id="mobileSettingsBtn" class="mobile-gear-btn" aria-label="Settings">⚙</button>
-      <button id="mobileChangePwBtn" class="btn-secondary">Change password</button>
-      <button id="mobileLogoutBtn" class="btn-secondary">Log out</button>
-    </div>
-  `;
+  <div class="row" style="margin-top:18px">
+    <button id="mobileSettingsBtn" class="mobile-gear-btn" aria-label="Settings">⚙</button>
+    <button id="mobileChangePwBtn" class="btn-secondary">Change password</button>
+    <button id="mobileLogoutBtn" class="btn-secondary">Log out</button>
+  </div>
+`;
 
   drawer.classList.toggle('hidden', !mobileDrawerOpen);
   overlay.classList.toggle('hidden', !mobileDrawerOpen);
@@ -498,6 +498,10 @@ function renderMobileDrawer(){
   document.getElementById('mobileSettingsBtn').onclick=()=>openChangePasswordModal();
   document.getElementById('mobileChangePwBtn').onclick=()=>openChangePasswordModal();
   document.getElementById('mobileLogoutBtn').onclick=logout;
+  const drawerUserBtn = document.getElementById('mobileDrawerUserBtn');
+if(drawerUserBtn){
+  drawerUserBtn.onclick = closeMobileDrawer;
+}
 }
 
 function renderMobileStudentChrome(){
@@ -515,10 +519,19 @@ function renderMobileStudentChrome(){
 
   bottom.classList.remove('hidden');
 
-  if(avatar){
-    avatar.style.cursor='pointer';
-    avatar.onclick=openMobileDrawer;
-  }
+if(avatar){
+  avatar.style.cursor = 'pointer';
+  avatar.setAttribute('role', 'button');
+  avatar.setAttribute('aria-label', 'Open folders');
+
+  avatar.onclick = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+
+    mobileDrawerOpen = true;
+    renderMobileDrawer();
+  };
+}
 
   if(logout) logout.classList.add('mobile-hidden');
   if(topChange) topChange.classList.add('mobile-hidden');
@@ -1913,6 +1926,22 @@ if(resetBtn){
   resetBtn.onclick = () => {
     resetDemo();
     setMessage(document.getElementById('loginMsg'),'ok','Demo data reset...');
+  };
+}
+const quickComposeBtn = document.getElementById('quickComposeBtn');
+
+if(quickComposeBtn){
+  quickComposeBtn.onclick = () => {
+    composeMode = 'new';
+    composeSelectedTo = [];
+    composeSelectedCc = [];
+
+    if(isStudentMobile()){
+      mobileStudentTab = 'mail';
+      mobileStudentView = 'detail';
+    }
+
+    renderMailbox();
   };
 }
   document.getElementById('logoutBtn').onclick=logout;
