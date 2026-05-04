@@ -76,15 +76,15 @@ function saveState(){
   const cleanState = clone(state);
   state = cleanState;
 
-  saveQueue = saveQueue
-    .then(async ()=>{
-      await setDoc(PLCMAIL_DOC, cleanState);
-    })
-    .catch((error)=>{
-      console.error("Failed to save PLC Mail state:", error);
-    });
+  const task = saveQueue.then(async () => {
+    await setDoc(PLCMAIL_DOC, cleanState);
+  });
 
-  return saveQueue;
+  saveQueue = task.catch((error) => {
+    console.error("Failed to save PLC Mail state:", error);
+  });
+
+  return task;
 }
 function waitForPendingSave(){
   return saveQueue;
@@ -1647,14 +1647,25 @@ async function sendCurrentMessage(){
       });
     }
 
-    saveState();
-    composeMode = null;
-    composeSelectedTo = [];
-    composeSelectedCc = [];
-    mailFolder = 'sent';
-    selectedMailId = state.mailboxes[user.id].sent[0]?.id || null;
-    renderMailbox();
-    return;
+try{
+  await saveState();
+}catch(error){
+  console.error("SEND SAVE FAILED:", error);
+  setMessage(
+    msg,
+    'warn',
+    'The message was created, but it could not be saved. Check the console for the Firebase error.'
+  );
+  return;
+}
+
+composeMode = null;
+composeSelectedTo = [];
+composeSelectedCc = [];
+mailFolder = 'sent';
+selectedMailId = state.mailboxes[user.id].sent[0]?.id || null;
+renderMailbox();
+return;
   }
 
   const mail = currentMail();
@@ -1687,10 +1698,21 @@ async function sendCurrentMessage(){
 
     mail.replies = mail.replies || [];
     mail.replies.push({type:'reply', text, time:shortTime()});
-    saveState();
-    composeMode = null;
-    renderMailbox();
-    return;
+try{
+  await saveState();
+}catch(error){
+  console.error("REPLY SAVE FAILED:", error);
+  setMessage(
+    msg,
+    'warn',
+    'The reply was created, but it could not be saved. Check the console for the Firebase error.'
+  );
+  return;
+}
+
+composeMode = null;
+renderMailbox();
+return;
   }
 
   setMessage(msg,'warn','Forwarding is limited in this build. Use New message to send to users or classes.');
