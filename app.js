@@ -2021,15 +2021,31 @@ document.getElementById('newMailBtn').onclick=()=>{
   renderMailReader();
 };
 
-  window.addEventListener('resize', ()=>{
-    if(!currentUser() || currentUser().role==='teacher') return;
-    if(!isStudentMobile()){
-      mobileStudentTab='mail';
-      mobileStudentView='list';
-      closeMobileDrawer();
-    }
-    renderMailbox();
-  });
+window.addEventListener('resize', ()=>{
+  if(!currentUser() || currentUser().role === 'teacher') return;
+
+  const active = document.activeElement;
+  const isTyping =
+    active &&
+    (
+      active.tagName === 'INPUT' ||
+      active.tagName === 'TEXTAREA' ||
+      active.tagName === 'SELECT' ||
+      active.isContentEditable
+    );
+
+  // On mobile, opening the keyboard triggers resize.
+  // Do not redraw the mailbox while the user is typing.
+  if(isTyping) return;
+
+  if(!isStudentMobile()){
+    mobileStudentTab = 'mail';
+    mobileStudentView = 'list';
+    closeMobileDrawer();
+  }
+
+  renderMailbox();
+});
 }
 
 
