@@ -1,4 +1,14 @@
-import { db, doc, getDoc, setDoc, onSnapshot } from "./firebase-init.js";
+import {
+  db,
+  storage,
+  doc,
+  getDoc,
+  setDoc,
+  onSnapshot,
+  ref,
+  uploadBytes,
+  getDownloadURL
+} from "./firebase-init.js";
 const STORAGE_KEY = 'plcmail_local_v3';
 
 const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
@@ -60,6 +70,7 @@ function isTeacherUser(){
 }
 function className(id){ return state.classes.find(c=>c.id===id)?.name || ''; }
 function saveState(){
+  removeOldAttachmentDataUrls();
   ensureStateShape();
 
   const cleanState = clone(state);
@@ -2384,11 +2395,30 @@ function fileToDataUrl(file){
   });
 }
 async function fileToAttachment(file){
-  const obj={id:uid('att'), filename:file.name, filetype:(file.name.split('.').pop()||file.type||'FILE').toUpperCase(), size:formatBytes(file.size), mimetype:file.type||'application/octet-stream'};
-  if(file.size<=350000){
-    obj.dataUrl = await new Promise((resolve)=>{ const reader=new FileReader(); reader.onload=()=>resolve(String(reader.result||'')); reader.onerror=()=>resolve(''); reader.readAsDataURL(file); });
-  }
-  return obj;
+  const attachmentId = uid('att');
+
+  const safeName = file.name
+    .replaceAll('/', '-')
+    .replaceAll('\\', '-');
+
+  const path = `attachments/templates/${Date.now()}-${attachmentId}-${safeName}`;
+  const storageRef = ref(storage, path);
+
+  await uploadBytes(storageRef, file, {
+    contentType: file.type || 'application/octet-stream'
+  });
+
+  const downloadUrl = await getDownloadURL(storageRef);
+
+  return {
+    id: attachmentId,
+    filename: file.name,
+    filetype: (file.name.split('.').pop() || file.type || 'FILE').toUpperCase(),
+    size: formatBytes(file.size),
+    mimetype: file.type || 'application/octet-stream',
+    storagePath: path,
+    downloadUrl
+  };
 }
 async function collectFileAttachments(fileInputId, textInputId=''){
   const arr=[];
@@ -2435,21 +2465,36 @@ function bindFileSummary(fileInputId, summaryId){
 
 
 async function collectRealAttachments(inputId='msgAttachments'){
-  const input=document.getElementById(inputId);
+  const input = document.getElementById(inputId);
   if(!input || !input.files || !input.files.length) return [];
 
-  const files=Array.from(input.files);
-  const output=[];
+  const files = Array.from(input.files);
+  const output = [];
 
   for(const file of files){
-    const dataUrl = await fileToDataUrl(file);
+    const attachmentId = uid('att');
+
+    const safeName = file.name
+      .replaceAll('/', '-')
+      .replaceAll('\\', '-');
+
+    const path = `attachments/${currentUserId || 'unknown-user'}/${Date.now()}-${attachmentId}-${safeName}`;
+    const storageRef = ref(storage, path);
+
+    await uploadBytes(storageRef, file, {
+      contentType: file.type || 'application/octet-stream'
+    });
+
+    const downloadUrl = await getDownloadURL(storageRef);
+
     output.push({
-      id: uid('att'),
+      id: attachmentId,
       filename: file.name,
       filetype: (file.name.split('.').pop() || 'FILE').toUpperCase(),
       size: formatBytes(file.size),
       mimetype: file.type || 'application/octet-stream',
-      dataUrl
+      storagePath: path,
+      downloadUrl
     });
   }
 
@@ -2464,26 +2509,26 @@ function deliverTemplateToUser(s, tpl, userId, folderOverride=''){
   s.mailboxes[userId][folder].unshift(mail);
 }
 function openAttachment(mail, attId){
-  const a=(mail.attachments||[]).find(x=>x.id===attId);
+  const a = (mail.attachments || []).find(x => x.id === attId);
   if(!a) return;
 
-  let preview='';
-  let actions='<button id="closeAttBtn" class="btn-secondary">Close</button>';
+  let preview = '';
+  let actions = '<button id="closeAttBtn" class="btn-secondary">Close</button>';
 
-  if(a.dataUrl && String(a.mimetype||'').startsWith('image/')){
-    preview=`<div class="panel" style="padding:12px">
-      <img src="${a.dataUrl}" alt="${esc(a.filename)}" style="max-width:100%;border-radius:14px">
+  if(a.downloadUrl && String(a.mimetype || '').startsWith('image/')){
+    preview = `<div class="panel" style="padding:12px">
+      <img src="${a.downloadUrl}" alt="${esc(a.filename)}" style="max-width:100%;border-radius:14px">
     </div>`;
   }
 
-  if(a.dataUrl && String(a.mimetype||'').includes('pdf')){
-    preview=`<div class="panel" style="padding:0;overflow:hidden">
-      <iframe src="${a.dataUrl}" style="width:100%;height:70vh;border:none"></iframe>
+  if(a.downloadUrl && String(a.mimetype || '').includes('pdf')){
+    preview = `<div class="panel" style="padding:0;overflow:hidden">
+      <iframe src="${a.downloadUrl}" style="width:100%;height:70vh;border:none"></iframe>
     </div>`;
   }
 
-  if(a.dataUrl){
-    actions=`<button id="downloadAttBtn" class="btn btn-primary">Download</button>
+  if(a.downloadUrl){
+    actions = `<button id="downloadAttBtn" class="btn btn-primary">Download</button>
     <button id="closeAttBtn" class="btn-secondary">Close</button>`;
   }
 
@@ -2493,20 +2538,52 @@ function openAttachment(mail, attId){
         <strong>${esc(a.filename)}</strong>
         <div class="muted">${esc(a.filetype)} • ${esc(a.size)}</div>
       </div>
-      ${preview || '<div class="message ok">This attachment is available inside the local prototype.</div>'}
+      ${preview || '<div class="message ok">This attachment is stored in Firebase Storage.</div>'}
       <div class="row">${actions}</div>
     </div>`, 'compact');
 
-  const close=document.getElementById('closeAttBtn');
-  if(close) close.onclick=closeModal;
+  const close = document.getElementById('closeAttBtn');
+  if(close) close.onclick = closeModal;
 
-  const down=document.getElementById('downloadAttBtn');
-  if(down) down.onclick=()=>{
-    const link=document.createElement('a');
-    link.href=a.dataUrl;
-    link.download=a.filename||'attachment';
+  const down = document.getElementById('downloadAttBtn');
+  if(down) down.onclick = () => {
+    const link = document.createElement('a');
+    link.href = a.downloadUrl;
+    link.download = a.filename || 'attachment';
+    link.target = '_blank';
     link.click();
   };
+}
+function removeOldAttachmentDataUrls(){
+  if(!state || !state.mailboxes) return;
+
+  Object.values(state.mailboxes).forEach(box => {
+    ['inbox', 'junk', 'deleted', 'sent'].forEach(folder => {
+      (box[folder] || []).forEach(mail => {
+        (mail.attachments || []).forEach(att => {
+          if(att.dataUrl){
+            delete att.dataUrl;
+          }
+        });
+      });
+    });
+  });
+
+  (state.templates || []).forEach(tpl => {
+    (tpl.attachments || []).forEach(att => {
+      if(att.dataUrl){
+        delete att.dataUrl;
+      }
+    });
+  });
+
+  (state.automations || []).forEach(auto => {
+    (auto.attachments || []).forEach(att => {
+      if(att.dataUrl){
+        delete att.dataUrl;
+      }
+    });
+  });
 }
 function renderAdminSidebar(){
   const items=[['dashboard','Dashboard'],['classes','Classes'],['students','Students'],['staff','Staff'],['inbox','Inbox'],['calendar_admin','Calendar'],['send','Send Email'],['mailboxes','Student Mailboxes'],['settings','Settings']];
