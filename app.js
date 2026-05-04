@@ -1635,7 +1635,36 @@ async function sendCurrentMessage(){
       sentIds.add(recipient.id);
       deliverInternal(state, user.id, recipient.id, subject, text, 'inbox', attachments);
     });
-
+console.log("SEND DEBUG - after deliverInternal", {
+  from: user.displayName,
+  subject,
+  toUsers: toUsers.map(r => ({
+    id: r.id,
+    label: r.label,
+    displayName: r.displayName,
+    email: r.email
+  })),
+  ccUsers: ccUsers.map(r => ({
+    id: r.id,
+    label: r.label,
+    displayName: r.displayName,
+    email: r.email
+  })),
+  recipientInboxCheck: [...toUsers, ...ccUsers].map(r => ({
+    id: r.id,
+    name: r.displayName,
+    role: getUser(r.id)?.role,
+    inboxCount: state.mailboxes[r.id]?.inbox?.length,
+    latestSubject: state.mailboxes[r.id]?.inbox?.[0]?.subject,
+    latestRecipientId: state.mailboxes[r.id]?.inbox?.[0]?.recipientId
+  })),
+  senderSentCheck: {
+    senderId: user.id,
+    sentCount: state.mailboxes[user.id]?.sent?.length,
+    latestSentSubject: state.mailboxes[user.id]?.sent?.[0]?.subject,
+    latestSentRecipientId: state.mailboxes[user.id]?.sent?.[0]?.recipientId
+  }
+});
     if(user.role==='student'){
       toUsers.forEach(recipient => {
         const target = getUser(recipient.id);
@@ -1658,7 +1687,25 @@ try{
   );
   return;
 }
+const verifySnapshot = await getDoc(PLCMAIL_DOC);
+const verifyState = verifySnapshot.data();
 
+console.log("SEND DEBUG - after Firestore save", {
+  savedRecipientInboxCheck: [...toUsers, ...ccUsers].map(r => ({
+    id: r.id,
+    name: r.displayName,
+    role: verifyState.users.find(u => u.id === r.id)?.role,
+    inboxCount: verifyState.mailboxes[r.id]?.inbox?.length,
+    latestSubject: verifyState.mailboxes[r.id]?.inbox?.[0]?.subject,
+    latestRecipientId: verifyState.mailboxes[r.id]?.inbox?.[0]?.recipientId
+  })),
+  savedSenderSentCheck: {
+    senderId: user.id,
+    sentCount: verifyState.mailboxes[user.id]?.sent?.length,
+    latestSentSubject: verifyState.mailboxes[user.id]?.sent?.[0]?.subject,
+    latestSentRecipientId: verifyState.mailboxes[user.id]?.sent?.[0]?.recipientId
+  }
+});
 composeMode = null;
 composeSelectedTo = [];
 composeSelectedCc = [];
