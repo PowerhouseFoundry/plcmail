@@ -71,6 +71,7 @@ function isTeacherUser(){
 function className(id){ return state.classes.find(c=>c.id===id)?.name || ''; }
 function saveState(){
   removeOldAttachmentDataUrls();
+  removeOrphanLogins();
   ensureStateShape();
 
   const cleanState = clone(state);
@@ -165,6 +166,21 @@ function ensureStateShape(){
     if(!state.events[u.id]) state.events[u.id]=[];
     if(typeof u.active === 'undefined') u.active = true;
     
+  });
+}
+function removeOrphanLogins(){
+  if(!state || !Array.isArray(state.users) || !Array.isArray(state.logins)) return;
+
+  const userIds = new Set(state.users.map(u => u.id));
+
+  state.logins = state.logins.filter(login => {
+    const hasUser = userIds.has(login.userId);
+
+    if(!hasUser){
+      console.warn('Removed orphan login with no matching user:', login);
+    }
+
+    return hasUser;
   });
 }
 function clone(data){
@@ -816,13 +832,46 @@ function templateGroupCounts(){ const m=new Map(); TEMPLATE_GROUPS.forEach(g=>m.
 function adminUsers(role){ return state.users.filter(u=>u.role===role); }
 function groupTagClass(group){ return group==='Phishing / scam'?'phishing':group==='Spam / junk'?'spam':group==='Internal staff emails'?'internal':'safe'; }
 function deleteUserPermanently(userId){
-  state.users = state.users.filter(u=>u.id!==userId);
+  const deletedUser = getUser(userId);
+
+  state.users = state.users.filter(u => u.id !== userId);
+
+  // IMPORTANT: remove the matching login too,
+  // otherwise the deleted student gets recreated when they log in.
+  state.logins = (state.logins || []).filter(l => l.userId !== userId);
+
   delete state.mailboxes[userId];
   delete state.events[userId];
-  state.automations = state.automations.map(auto=>({ ...auto, studentIds:(auto.studentIds||[]).filter(id=>id!==userId) })).filter(auto=>auto.kind==='custom' ? (auto.studentIds||[]).length : ((auto.studentIds||[]).length && (auto.kind==='custom' || auto.templateId)));
-  state.activityLog = (state.activityLog||[]).filter(a=>a.userId!==userId);
-  Object.values(state.mailboxes).forEach(box=>['inbox','junk','deleted','sent'].forEach(folder=>{ box[folder]=box[folder].filter(mail=>mail.senderId!==userId && mail.recipientId!==userId); }));
-  if(selectedMailboxStudentId===userId) selectedMailboxStudentId='';
+
+  state.automations = state.automations
+    .map(auto => ({
+      ...auto,
+      studentIds: (auto.studentIds || []).filter(id => id !== userId)
+    }))
+    .filter(auto =>
+      auto.kind === 'custom'
+        ? (auto.studentIds || []).length
+        : ((auto.studentIds || []).length && (auto.kind === 'custom' || auto.templateId))
+    );
+
+  state.activityLog = (state.activityLog || []).filter(a => a.userId !== userId);
+
+  Object.values(state.mailboxes || {}).forEach(box => {
+    ['inbox', 'junk', 'deleted', 'sent'].forEach(folder => {
+      box[folder] = (box[folder] || []).filter(mail =>
+        mail.senderId !== userId && mail.recipientId !== userId
+      );
+    });
+  });
+
+  if(selectedMailboxStudentId === userId) selectedMailboxStudentId = '';
+
+  console.log('Deleted user and login:', {
+    userId,
+    email: deletedUser?.email,
+    displayName: deletedUser?.displayName
+  });
+
   saveState();
 }
 function peopleClassTabs(role){
@@ -1888,11 +1937,10 @@ function migrateState(){
 async function init(){
   await loadInitialStateFromFirestore();
   ensureStateShape();
-  await saveState();
+  removeOrphanLogins();
   startFirestoreSync();
   document.getElementById('loginEmail').value = '';
-document.getElementById('loginPassword').value = '';
-
+  document.getElementById('loginPassword').value = '';
 }
 
 function createInitialState(){
