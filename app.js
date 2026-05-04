@@ -48,6 +48,14 @@ let composeRecipientMode = 'to';
 function uid(prefix){ return prefix + '_' + Math.random().toString(36).slice(2,10); }
 function esc(t){ return String(t ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#039;'); }
 function initials(name){ return String(name||'').split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase(); }
+function mailAvatarText(mail){
+  if(mailFolder === 'sent'){
+    const recipient = getUser(mail.recipientId);
+    return initials(recipient?.displayName || mail.recipientName || 'PL');
+  }
+
+  return initials(mail.senderName || 'PL');
+}
 function shortTime(){ return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); }
 function timestamp(){ return new Date().toLocaleString(); }
 function todayKey(){ const d=new Date(); return d.toISOString().slice(0,10); }
@@ -3384,9 +3392,31 @@ function renderMailList(){
   if(!selectedMailId && items[0]) selectedMailId=items[0].id;
   if(!items.find(i=>i.id===selectedMailId)) selectedMailId=items[0]?.id||null;
 
-  list.innerHTML = items.length
-    ? items.map(m=>`<button class="mail-item ${m.id===selectedMailId?'active':''}" data-mail="${m.id}"><div class="mail-top"><div style="min-width:0"><div class="mail-from">${m.read?'':'<span class="dot"></span>'}<span class="truncate ${m.read?'read':'unread'}">${esc(m.senderName)}</span>${m.flagged?'<span style="color:#f59e0b">⚑</span>':''}</div><div class="truncate ${m.read?'read':'unread'}">${esc(m.subject)}</div></div><span class="time">${esc(m.timeLabel)}</span></div><div class="preview truncate">${esc(m.preview)}</div></button>`).join('')
-    : '<div class="panel" style="margin:16px">No messages in this folder.</div>';
+list.innerHTML = items.length
+  ? items.map(m=>`
+    <button class="mail-item ${m.id===selectedMailId?'active':''}" data-mail="${m.id}">
+      <div class="mail-item-row">
+        <div class="mail-list-avatar">${esc(mailAvatarText(m))}</div>
+
+        <div class="mail-item-content">
+          <div class="mail-top">
+            <div style="min-width:0">
+              <div class="mail-from">
+                ${m.read ? '' : '<span class="dot"></span>'}
+                <span class="truncate ${m.read?'read':'unread'}">${esc(m.senderName)}</span>
+                ${m.flagged ? '<span style="color:#f59e0b">⚑</span>' : ''}
+              </div>
+              <div class="truncate ${m.read?'read':'unread'}">${esc(m.subject)}</div>
+            </div>
+            <span class="time">${esc(m.timeLabel)}</span>
+          </div>
+
+          <div class="preview truncate">${esc(m.preview)}</div>
+        </div>
+      </div>
+    </button>
+  `).join('')
+  : '<div class="panel" style="margin:16px">No messages in this folder.</div>';
 
 document.querySelectorAll('[data-mail]').forEach(b=>b.onclick=()=>{
   selectedMailId = b.dataset.mail;

@@ -753,3 +753,39 @@
     display:none !important;
   }
 }
+.mail-item-row{
+  display:flex;
+  align-items:flex-start;
+  gap:12px;
+  width:100%;
+}
+
+.mail-list-avatar{
+  width:38px;
+  height:38px;
+  border-radius:999px;
+  background:#0f172a;
+  color:#fff;
+  display:grid;
+  place-items:center;
+  font-weight:800;
+  font-size:13px;
+  flex:0 0 auto;
+}
+
+.mail-item-content{
+  flex:1;
+  min-width:0;
+}
+
+@media (max-width: 920px){
+  .mail-list-avatar{
+    width:42px;
+    height:42px;
+    font-size:14px;
+  }
+
+  .mail-item{
+    padding:14px 12px;
+  }
+}
