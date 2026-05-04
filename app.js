@@ -1919,34 +1919,55 @@ function moveMail(newFolder){ const mail=currentMail(); if(!mail) return; const 
 function toggleFlag(){ const mail=currentMail(); if(!mail) return; mail.flagged=!mail.flagged; saveState(); renderMailbox(); }
 
 function bindEvents(){
-  document.getElementById('modalOverlay').addEventListener('click', e=>{ if(e.target.id==='modalOverlay') closeModal(); });
-  document.getElementById('loginBtn').onclick=()=>login(document.getElementById('loginEmail').value, document.getElementById('loginPassword').value);
+  document.getElementById('modalOverlay').addEventListener('click', e=>{ 
+    if(e.target.id==='modalOverlay') closeModal(); 
+  });
+
+  document.getElementById('loginBtn').onclick=()=>login(
+    document.getElementById('loginEmail').value, 
+    document.getElementById('loginPassword').value
+  );
+
   const resetBtn = document.getElementById('resetDemoBtn');
-if(resetBtn){
-  resetBtn.onclick = () => {
-    resetDemo();
-    setMessage(document.getElementById('loginMsg'),'ok','Demo data reset...');
-  };
-}
-const quickComposeBtn = document.getElementById('quickComposeBtn');
 
-if(quickComposeBtn){
-  quickComposeBtn.onclick = () => {
-    composeMode = 'new';
-    composeSelectedTo = [];
-    composeSelectedCc = [];
+  if(resetBtn){
+    resetBtn.onclick = () => {
+      resetDemo();
+      setMessage(document.getElementById('loginMsg'),'ok','Demo data reset...');
+    };
+  }
 
-    if(isStudentMobile()){
-      mobileStudentTab = 'mail';
-      mobileStudentView = 'detail';
-    }
+  const quickComposeBtn = document.getElementById('quickComposeBtn');
 
-    renderMailbox();
-  };
-}
+  if(quickComposeBtn){
+    quickComposeBtn.onclick = () => {
+      composeMode = 'new';
+      composeSelectedTo = [];
+      composeSelectedCc = [];
+
+      if(isStudentMobile()){
+        mobileStudentTab = 'mail';
+        mobileStudentView = 'detail';
+      }
+
+      renderMailbox();
+    };
+  }
+
+  const avatarBtn = document.getElementById('avatar');
+
+  if(avatarBtn){
+    avatarBtn.onclick = (e) => {
+      if(isStudentMobile()){
+        e.preventDefault();
+        e.stopPropagation();
+        openMobileDrawer();
+      }
+    };
+  }
+
   document.getElementById('logoutBtn').onclick=logout;
   document.getElementById('topChangePw').onclick=()=>openChangePasswordModal();
-
   document.getElementById('globalSearch').addEventListener('input', e=>{
     searchTerm=e.target.value;
     if(currentUser() && currentUser().role!=='teacher') renderMailbox();
@@ -3352,14 +3373,22 @@ function renderMailList(){
     : '<div class="panel" style="margin:16px">No messages in this folder.</div>';
 
 document.querySelectorAll('[data-mail]').forEach(b=>b.onclick=()=>{
-  selectedMailId=b.dataset.mail;
-  const m=currentMailItems().find(x=>x.id===selectedMailId);
-  if(m) m.read=true;
+  selectedMailId = b.dataset.mail;
+
+  // Important: close compose mode when opening an existing message
+  composeMode = null;
+  showHint = false;
+
+  const m = currentMailItems().find(x => x.id === selectedMailId);
+  if(m) m.read = true;
+
   saveState();
+
   if(isStudentMobile()){
-    mobileStudentTab='mail';
-    mobileStudentView='detail';
+    mobileStudentTab = 'mail';
+    mobileStudentView = 'detail';
   }
+
   renderMailbox();
 });
 }
