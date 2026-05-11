@@ -1057,7 +1057,7 @@ function openUserModal(defaultRole='student', userId=''){
   const existing=userId ? getUser(userId) : null;
   const role=existing ? existing.role : defaultRole;
 
-  openModal(`<h2>${existing?'Edit user':'Add '+role}</h2><div class="grid2"><div class="field"><label>Display name</label><input id="uName" type="text" value="${esc(existing?.displayName||'')}" placeholder="Alex Carter"></div><div class="field"><label>Username</label><input id="uUsername" type="text" value="${esc(existing?.username||'')}" placeholder="alex.carter"></div><div class="field"><label>Password</label><input id="uPassword" type="text" value="${esc(existing?.password||'')}" placeholder="alex123"></div><div class="field"><label>Role</label><select id="uRole" ${existing?'disabled':''}><option value="student" ${role==='student'?'selected':''}>Student</option><option value="staff" ${role==='staff'?'selected':''}>Staff</option></select></div><div class="field"><label>Class</label><select id="uClass"><option value="">No class</option>${state.classes.map(c=>`<option value="${c.id}" ${existing?.classId===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select></div><div class="field"><label>Status</label><select id="uActive"><option value="true" ${(existing?.active ?? true)?'selected':''}>Active</option><option value="false" ${existing && !existing.active?'selected':''}>Inactive</option></select></div></div><div class="row"><button id="saveUserBtn" class="btn btn-primary">${existing?'Save changes':'Create user'}</button><button id="cancelUserBtn" class="btn-secondary">Cancel</button></div>`);
+  openModal(`<h2>${existing?'Edit user':'Add '+role}</h2><div class="grid2"><div class="field"><label>Display name</label><input id="uName" type="text" value="${esc(existing?.displayName||'')}" placeholder="Alex Carter"></div><div class="field"><label>Username</label><input id="uUsername" type="text" value="${esc(existing?.username||'')}" placeholder="alex.carter"></div><div class="field"><label>Password</label><input id="uPassword" type="text" value="${esc(existing?.password||'')}" placeholder="alex123"></div><div class="field"><label>Role</label><select id="uRole" ${existing?'disabled':''}><option value="student" ${role==='student'?'selected':''}>Student</option><option value="staff" ${role==='staff'?'selected':''}>Staff</option></select></div><div class="field"><label>Class</label><select id="uClass"><option value="">No class</option>${state.classes.map(c=>`<option value="${c.id}" ${existing?.classId===c.id?'selected':''}>${esc(c.name)}</option>`).join('')}</select></div><div class="field"><label>Status</label><select id="uActive"><option value="true" ${(existing?.active ?? true)?'selected':''}>Active</option><option value="false" ${existing && !existing.active?'selected':''}>Inactive</option></select></div></div><div class="row"><button id="saveUserBtn" class="btn btn-primary">${existing?'Save changes':'Create user'}</button><button id="cancelUserBtn" class="btn-secondary">Cancel</button></div><div id="userSaveMsg"></div>`);
 
   document.getElementById('cancelUserBtn').onclick=closeModal;
 
@@ -1068,42 +1068,68 @@ function openUserModal(defaultRole='student', userId=''){
     const classId=document.getElementById('uClass').value;
     const active=document.getElementById('uActive').value==='true';
     const roleVal=existing ? existing.role : document.getElementById('uRole').value;
+    const email=fullEmail(username);
+    const msg=document.getElementById('userSaveMsg');
 
-    if(!displayName || !username || !password) return;
+    if(!displayName || !username || !password){
+      setMessage(msg,'warn','Enter a name, username and password.');
+      return;
+    }
+
+    const duplicateUser=state.users.find(u=>u.email.toLowerCase()===email.toLowerCase() && u.id!==existing?.id);
+    if(duplicateUser){
+      setMessage(msg,'warn','That username/email already exists. Choose a different username.');
+      return;
+    }
 
     if(existing){
       existing.displayName=displayName;
       existing.username=username;
-      existing.email=fullEmail(username);
+      existing.email=email;
       existing.password=password;
       existing.classId=classId;
       existing.active=active;
+
+      const login=state.logins?.find(l=>l.userId===existing.id);
+      if(login){
+        login.role=existing.role;
+        login.username=username;
+        login.email=email;
+        login.password=password;
+        login.active=active;
+        login.displayName=displayName;
+        login.classId=classId;
+      }
     } else {
       const u={
         id:uid('user'),
         role:roleVal,
         displayName,
         username,
-        email:fullEmail(username),
+        email,
         password,
         classId,
         active,
         lastLogin:''
       };
+
       state.users.push(u);
+
+      state.logins=Array.isArray(state.logins) ? state.logins : [];
       state.logins.push({
-  id:uid('login'),
-  userId:u.id,
-  role:roleVal,
-  username,
-  email: fullEmail(username),
-  password,
-  active,
-  displayName,
-  classId
-});
+        id:uid('login'),
+        userId:u.id,
+        role:roleVal,
+        username,
+        email,
+        password,
+        active,
+        displayName,
+        classId
+      });
+
       state.mailboxes[u.id]={inbox:[],junk:[],deleted:[],sent:[]};
-      state.events[u.id]=[{day:'Mon',title:'Check-in',time:'10:00'}];
+      state.events[u.id]=[];
     }
 
     await saveState();
