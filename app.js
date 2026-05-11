@@ -993,8 +993,19 @@ function peopleClassTabs(role){
 function renderStudentsPage(main){
   const students=adminUsers('student');
   if(!studentManageClassId && state.classes[0]) studentManageClassId=state.classes[0].id;
-  const filtered = studentManageClassId ? students.filter(u=>u.classId===studentManageClassId) : students;
-  main.innerHTML=`<div class="stack"><div class="split"><div><h2 style="margin:0">Students</h2><p class="muted">Students are grouped by class tabs. Teachers can still see passwords and delete students permanently.</p></div><button id="addStudentBtn" class="btn btn-primary">Add student</button></div>${peopleClassTabs('student')}<div class="panel table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Password</th><th>Status</th><th>Last login</th><th>Actions</th></tr></thead><tbody>${filtered.length?filtered.map(u=>`<tr><td>${esc(u.displayName)}</td><td>${esc(u.email)}</td><td>${esc(u.password)}</td><td>${u.active?'<span class="tag safe">Active</span>':'<span class="tag phishing">Inactive</span>'}</td><td>${esc(u.lastLogin||'Never')}</td><td><div class="row"><button class="mini-btn" data-edit-user="${u.id}">Edit</button><button class="mini-btn" data-open-box="${u.id}">Open mailbox</button><button class="btn-danger" data-delete-user="${u.id}">Delete student</button></div></td></tr>`).join(''):'<tr><td colspan="6" class="muted">No students in this class.</td></tr>'}</tbody></table></div></div>`;
+const filtered = studentManageClassId
+  ? students.filter(u => u.classId === studentManageClassId || !u.classId)
+  : students;
+  main.innerHTML=`<div class="stack"><div class="split"><div><h2 style="margin:0">Students</h2><p class="muted">Students are grouped by class tabs. Teachers can still see passwords and delete students permanently.</p></div><button id="addStudentBtn" class="btn btn-primary">Add student</button></div><div class="row" style="margin-bottom:12px">
+  <button
+    class="chip-btn ${!studentManageClassId ? 'active' : ''}"
+    data-student-class-tab=""
+  >
+    All students
+  </button>
+
+  ${peopleClassTabs('student')}
+</div><div class="panel table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Password</th><th>Status</th><th>Last login</th><th>Actions</th></tr></thead><tbody>${filtered.length?filtered.map(u=>`<tr><td>${esc(u.displayName)}</td><td>${esc(u.email)}</td><td>${esc(u.password)}</td><td>${u.active?'<span class="tag safe">Active</span>':'<span class="tag phishing">Inactive</span>'}</td><td>${esc(u.lastLogin||'Never')}</td><td><div class="row"><button class="mini-btn" data-edit-user="${u.id}">Edit</button><button class="mini-btn" data-open-box="${u.id}">Open mailbox</button><button class="btn-danger" data-delete-user="${u.id}">Delete student</button></div></td></tr>`).join(''):'<tr><td colspan="6" class="muted">No students in this class.</td></tr>'}</tbody></table></div></div>`;
   document.getElementById('addStudentBtn').onclick=()=>openUserModal('student');
   document.querySelectorAll('[data-student-class-tab]').forEach(b=>b.onclick=()=>{ studentManageClassId=b.dataset.studentClassTab; renderAdmin(); });
   document.querySelectorAll('[data-edit-user]').forEach(b=>b.onclick=()=>openUserModal('student',b.dataset.editUser));
