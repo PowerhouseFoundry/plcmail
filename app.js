@@ -1500,7 +1500,35 @@ function currentMail(){ return (state.mailboxes[currentUserId][mailFolder]||[]).
 
 
 
-function bodyHtml(mail){ let safe=esc(mail.body); if(mail.linkTarget && mail.linkLabel){ safe=safe.replace('[['+mail.linkLabel+']]', `<span class="email-link" data-link="${mail.linkTarget}">${mail.linkLabel}</span>`); } return safe; }
+function autoLinkText(text){
+  let safe = esc(text || '');
+
+  safe = safe.replace(
+    /(https?:\/\/[^\s<]+|www\.[^\s<]+)/gi,
+    match => {
+      const clean = match.replace(/[.,!?;:)]+$/,'');
+      const punctuation = match.slice(clean.length);
+      const href = clean.startsWith('http') ? clean : 'https://' + clean;
+
+      return `<a class="email-link" href="${href}" target="_blank" rel="noopener noreferrer">${clean}</a>${punctuation}`;
+    }
+  );
+
+  return safe;
+}
+
+function bodyHtml(mail){
+  let safe = autoLinkText(mail.body || '');
+
+  if(mail.linkTarget && mail.linkLabel){
+    safe = safe.replace(
+      '[[' + mail.linkLabel + ']]',
+      `<span class="email-link" data-link="${mail.linkTarget}">${esc(mail.linkLabel)}</span>`
+    );
+  }
+
+  return safe;
+}
 function composeDirectory(user){
   const people = (user.role === 'student'
     ? allowedRecipients(user)
@@ -3652,7 +3680,7 @@ if(composeMode==='new'){
   ${showHint?`<div class="hint-card"><h3>Things to check</h3><ul>${mail.hints.map(h=>`<li>${esc(h.label)}</li>`).join('')}</ul></div>`:''}
   <div class="mail-body ${showHint && mail.hints.some(h=>h.target==='body')?'hinted':''}">${bodyHtml(mail)}</div>
   ${mail.attachments?.length?`<div class="attachment-wrap">${mail.attachments.map(a=>`<div class="attachment"><div><strong>${esc(a.filename)}</strong><div class="muted">${esc(a.filetype)} • ${esc(a.size)}</div></div><button class="btn-secondary" data-open-att="${a.id}">Open</button></div>`).join('')}</div>`:''}
-  ${(mail.replies||[]).map(r=>`<div class="reply-card"><div class="reply-head"><strong>You ${r.type==='forward'?'forwarded':'replied'}</strong><span>${esc(r.time)}</span></div><div style="white-space:pre-wrap;line-height:1.8">${esc(r.text)}</div></div>`).join('')}
+  ${(mail.replies||[]).map(r=>`<div class="reply-card"><div class="reply-head"><strong>You ${r.type==='forward'?'forwarded':'replied'}</strong><span>${esc(r.time)}</span></div><div style="white-space:pre-wrap;line-height:1.8">${autoLinkText(r.text)}</div></div>`).join('')}
   ${composeMode?renderComposeReply(mail):''}`;
 
   root.querySelectorAll('[data-link]').forEach(el=>el.onclick=()=>openFakePage(el.dataset.link));
