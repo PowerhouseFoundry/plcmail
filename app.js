@@ -3678,10 +3678,11 @@ if(composeMode==='new'){
     <div class="tag ${badge}">${badgeLabel}</div>
   </div>
   ${showHint?`<div class="hint-card"><h3>Things to check</h3><ul>${mail.hints.map(h=>`<li>${esc(h.label)}</li>`).join('')}</ul></div>`:''}
+${composeMode?renderComposeReply(mail):''}
   <div class="mail-body ${showHint && mail.hints.some(h=>h.target==='body')?'hinted':''}">${bodyHtml(mail)}</div>
   ${mail.attachments?.length?`<div class="attachment-wrap">${mail.attachments.map(a=>`<div class="attachment"><div><strong>${esc(a.filename)}</strong><div class="muted">${esc(a.filetype)} • ${esc(a.size)}</div></div><button class="btn-secondary" data-open-att="${a.id}">Open</button></div>`).join('')}</div>`:''}
   ${(mail.replies||[]).map(r=>`<div class="reply-card"><div class="reply-head"><strong>You ${r.type==='forward'?'forwarded':'replied'}</strong><span>${esc(r.time)}</span></div><div style="white-space:pre-wrap;line-height:1.8">${autoLinkText(r.text)}</div></div>`).join('')}
-  ${composeMode?renderComposeReply(mail):''}`;
+  `;
 
   root.querySelectorAll('[data-link]').forEach(el=>el.onclick=()=>openFakePage(el.dataset.link));
   root.querySelectorAll('[data-open-att]').forEach(el=>el.onclick=()=>openAttachment(mail, el.dataset.openAtt));
