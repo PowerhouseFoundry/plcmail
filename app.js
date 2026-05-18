@@ -3625,14 +3625,42 @@ function renderStaffTemplateReader(){
   document.getElementById('editTemplateSubject').value = tpl.subject || '';
   document.getElementById('editTemplateBody').value = tpl.body || '';
 
-  document.getElementById('saveTemplateBtn').onclick = ()=>{
-    tpl.subject = document.getElementById('editTemplateSubject').value;
-    tpl.body = document.getElementById('editTemplateBody').value;
-    saveState();
-    root.dataset.editing = '';
-    selectedTemplateId = tpl.id;
-    renderMailbox();
-  };
+document.getElementById('saveTemplateBtn').onclick = async ()=>{
+  const subject = document.getElementById('editTemplateSubject').value.trim();
+  const body = document.getElementById('editTemplateBody').value.trim();
+
+  if(!subject || !body){
+    alert('Enter a subject and message body.');
+    return;
+  }
+
+  if(tpl){
+    tpl.subject = subject;
+    tpl.body = body;
+  } else {
+    const newTemplate = {
+      id: uid('tpl'),
+      group: selectedTemplateGroup || 'Everyday safe emails',
+      type: 'safe',
+      senderName: currentUser()?.displayName || 'Sender',
+      senderEmail: currentUser()?.email || 'sender@plcmail.com',
+      subject,
+      preview: body.slice(0,90),
+      body,
+      defaultFolder: 'inbox',
+      linkTarget: '',
+      hints: templateHintsForType ? templateHintsForType('safe') : []
+    };
+
+    state.templates.push(newTemplate);
+    selectedTemplateId = newTemplate.id;
+  }
+
+  await saveState();
+
+  if(root) root.dataset.editing = '';
+  renderAdmin ? renderAdmin() : renderMailbox();
+};
 
   document.getElementById('cancelEditTemplateBtn').onclick = ()=>{
     root.dataset.editing = '';
