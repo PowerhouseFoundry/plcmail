@@ -819,3 +819,40 @@
     color:#fff;
   }
 }
+.student-check-row{
+  display:flex !important;
+  align-items:center !important;
+  justify-content:flex-start !important;
+  gap:10px !important;
+  width:100% !important;
+  padding:10px 12px !important;
+  border:1px solid var(--line) !important;
+  border-radius:14px !important;
+  background:#fff !important;
+  text-align:left !important;
+  white-space:nowrap !important;
+}
+
+.student-check-row input[type="checkbox"]{
+  width:16px !important;
+  height:16px !important;
+  min-width:16px !important;
+  max-width:16px !important;
+  margin:0 !important;
+  flex:0 0 16px !important;
+}
+
+.student-check-name{
+  flex:0 1 auto !important;
+  text-align:left !important;
+  font-weight:700 !important;
+  color:var(--text) !important;
+  overflow:hidden !important;
+  text-overflow:ellipsis !important;
+}
+
+.student-check-class{
+  flex:0 0 auto !important;
+  font-size:12px !important;
+  color:var(--muted) !important;
+}

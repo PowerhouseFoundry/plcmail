@@ -1013,8 +1013,23 @@ const filtered = studentManageClassId
   document.querySelectorAll('[data-delete-user]').forEach(b=>b.onclick=()=>confirmDeleteUser(b.dataset.deleteUser,'student'));
 }
 function selectedSendClassStudentRows(classId){
-  const ids = classId ? classStudentIds(classId) : [];
-  return ids.length ? ids.map(id=>{ const u=getUser(id); return `<label class="selector-item"><input type="checkbox" value="${u.id}"><div><div>${esc(u.displayName)}</div><small>${esc(u.email)}</small></div></label>`; }).join('') : '<div class="muted">Choose a class first.</div>';
+  const students = state.users.filter(u =>
+    u.role === 'student' &&
+    u.active &&
+    (!classId || u.classId === classId)
+  );
+
+  if(!students.length){
+    return '<div class="muted">No students found for this class.</div>';
+  }
+
+  return students.map(u => `
+    <label class="student-check-row">
+      <input type="checkbox" value="${u.id}">
+      <span class="student-check-name">${esc(u.displayName)}</span>
+      <span class="student-check-class">${esc(className(u.classId))}</span>
+    </label>
+  `).join('');
 }
 function confirmDeleteUser(userId, roleLabel){
   const u=getUser(userId); if(!u) return;
