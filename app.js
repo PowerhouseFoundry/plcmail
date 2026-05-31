@@ -1190,7 +1190,8 @@ function openTemplateEditModal(templateId){
 function classStudentIds(classId){ return state.users.filter(u=>u.role==='student' && u.active && u.classId===classId).map(u=>u.id); }
 
 function openTemplateSendModal(initialTemplateId=''){
-  const templateId = initialTemplateId || state.templates[0]?.id || '';
+  const availableTemplates = visibleTemplatesForCurrentUser();
+const templateId = initialTemplateId || availableTemplates[0]?.id || '';
 
   openModal(`
     <div id="sendTplModalRoot">
@@ -1199,7 +1200,7 @@ function openTemplateSendModal(initialTemplateId=''){
       <div class="field">
         <label>Template</label>
         <select id="sendTplTemplate">
-          ${state.templates.map(t=>`
+          ${availableTemplates.map(t=>`
             <option value="${t.id}" ${t.id===templateId ? 'selected' : ''}>
               ${esc(t.group)} — ${esc(t.subject)}
             </option>
@@ -1360,7 +1361,7 @@ function openTemplateSendModal(initialTemplateId=''){
   root.querySelector('#sendTplSubmit').onclick = async ()=>{
     const classId = classSelect.value;
     const folder = folderSelect.value;
-    const template = state.templates.find(t=>t.id === templateSelect.value);
+    const template = availableTemplates.find(t=>t.id === templateSelect.value);
     const attachments = await collectFileAttachments('sendTplFiles', 'sendTplAttachments');
 
     let ids = [];
@@ -2027,20 +2028,29 @@ function bindEvents(){
 
   const quickComposeBtn = document.getElementById('quickComposeBtn');
 
-  if(quickComposeBtn){
-    quickComposeBtn.onclick = () => {
-      composeMode = 'new';
-      composeSelectedTo = [];
-      composeSelectedCc = [];
-
-      if(isStudentMobile()){
-        mobileStudentTab = 'mail';
-        mobileStudentView = 'detail';
-      }
-
+if(quickComposeBtn){
+  quickComposeBtn.onclick = async () => {
+    if(isStaffUser() && mailFolder === 'templates'){
+      const tpl = createBlankStaffTemplate();
+      await saveState();
+      const root=document.getElementById('readerInner');
+      if(root) root.dataset.editing = tpl.id;
       renderMailbox();
-    };
-  }
+      return;
+    }
+
+    composeMode = 'new';
+    composeSelectedTo = [];
+    composeSelectedCc = [];
+
+    if(isStudentMobile()){
+      mobileStudentTab = 'mail';
+      mobileStudentView = 'detail';
+    }
+
+    renderMailbox();
+  };
+}
 
   const avatarBtn = document.getElementById('avatar');
 
@@ -3518,9 +3528,49 @@ document.querySelectorAll('[data-mail]').forEach(b=>b.onclick=()=>{
   renderMailbox();
 });
 }
+function visibleTemplatesForCurrentUser(){
+  const user = currentUser();
+
+  if(!user) return [];
+
+  if(user.role === 'teacher'){
+    return state.templates || [];
+  }
+
+  if(user.role === 'staff'){
+    return (state.templates || []).filter(t => t.ownerId === user.id);
+  }
+
+  return [];
+}
+
+function createBlankStaffTemplate(){
+  const user = currentUser();
+
+  const tpl = {
+    id: uid('tpl'),
+    ownerId: user.id,
+    group: 'Staff templates',
+    type: 'internal',
+    senderName: user.displayName,
+    senderEmail: user.email,
+    subject: 'New template',
+    preview: 'New staff template',
+    body: 'Write your template message here.',
+    defaultFolder: 'inbox',
+    linkTarget: '',
+    linkLabel: '',
+    hints: templateHintsForType('internal'),
+    attachments: []
+  };
+
+  state.templates.push(tpl);
+  selectedTemplateId = tpl.id;
+  return tpl;
+}
 function renderStaffTemplateList(){
   const list=document.getElementById('mailList');
-  const items=state.templates.slice();
+  const items=visibleTemplatesForCurrentUser();
 
   document.getElementById('folderTitle').textContent='Templates';
   document.getElementById('messageCount').textContent=items.length;
@@ -3528,36 +3578,62 @@ function renderStaffTemplateList(){
   if(!selectedTemplateId && items[0]) selectedTemplateId=items[0].id;
   if(!items.find(t=>t.id===selectedTemplateId)) selectedTemplateId=items[0]?.id || '';
 
-  list.innerHTML = items.length
-    ? items.map(t=>`
-      <button class="mail-item ${t.id===selectedTemplateId?'active':''}" data-template="${t.id}">
-        <div class="mail-top">
-          <div style="min-width:0">
-            <div class="mail-from">
-              <span class="truncate unread">${esc(t.senderName)}</span>
+  list.innerHTML = `
+    <div style="padding:12px">
+      <button id="newStaffTemplateBtn" class="btn btn-primary" style="width:100%">New template</button>
+    </div>
+    ${
+      items.length
+        ? items.map(t=>`
+          <button class="mail-item ${t.id===selectedTemplateId?'active':''}" data-template="${t.id}">
+            <div class="mail-top">
+              <div style="min-width:0">
+                <div class="mail-from">
+                  <span class="truncate unread">${esc(t.senderName)}</span>
+                </div>
+                <div class="truncate read">${esc(t.subject)}</div>
+              </div>
+              <span class="time">${esc(t.group || 'Template')}</span>
             </div>
-            <div class="truncate read">${esc(t.subject)}</div>
-          </div>
-          <span class="time">${esc(t.group)}</span>
-        </div>
-        <div class="preview truncate">${esc(t.preview)}</div>
-      </button>
-    `).join('')
-    : '<div class="panel" style="margin:16px">No templates found.</div>';
+            <div class="preview truncate">${esc(t.preview || '')}</div>
+          </button>
+        `).join('')
+        : '<div class="panel" style="margin:16px">No templates yet. Click New template to create one.</div>'
+    }
+  `;
+
+  const newBtn=document.getElementById('newStaffTemplateBtn');
+  if(newBtn){
+    newBtn.onclick=async ()=>{
+      const tpl=createBlankStaffTemplate();
+      await saveState();
+      const root=document.getElementById('readerInner');
+      if(root) root.dataset.editing=tpl.id;
+      renderMailbox();
+    };
+  }
 
   document.querySelectorAll('[data-template]').forEach(b=>{
     b.onclick=()=>{
       selectedTemplateId=b.dataset.template;
+      const root=document.getElementById('readerInner');
+      if(root) root.dataset.editing='';
       renderMailbox();
     };
   });
 }
 function renderStaffTemplateReader(){
   const root = document.getElementById('readerInner');
-  const tpl = state.templates.find(t => t.id === selectedTemplateId) || null;
+  const templates = visibleTemplatesForCurrentUser();
+  const tpl = templates.find(t => t.id === selectedTemplateId) || null;
 
   if(!tpl){
-    root.innerHTML = '<div class="panel">Select a template to preview it.</div>';
+    root.innerHTML = `
+      <div class="panel">
+        <h2 style="margin-top:0">Templates</h2>
+        <p class="muted">Click New template to create your own staff template.</p>
+      </div>
+    `;
     return;
   }
 
@@ -3572,34 +3648,35 @@ function renderStaffTemplateReader(){
             <strong>From:</strong> ${esc(tpl.senderName)} &lt;${esc(tpl.senderEmail)}&gt;
           </div>
         </div>
-        <div class="tag">${esc(tpl.group)}</div>
+        <div class="tag">${esc(tpl.group || 'Staff templates')}</div>
       </div>
 
-      <div class="mail-body">${esc(tpl.body)}</div>
+      <div class="mail-body">${bodyHtml(tpl)}</div>
 
       <div class="row" style="margin-top:18px">
         <button id="staffEditTemplateBtn" class="btn-secondary">Edit this template</button>
         <button id="staffSendTemplateBtn" class="btn btn-primary">Send this template</button>
+        <button id="staffDeleteTemplateBtn" class="btn-danger">Delete template</button>
       </div>
     `;
 
-    const editBtn = document.getElementById('staffEditTemplateBtn');
-    const sendBtn = document.getElementById('staffSendTemplateBtn');
+    document.getElementById('staffEditTemplateBtn').onclick = ()=>{
+      root.dataset.editing = tpl.id;
+      renderStaffTemplateReader();
+    };
 
-    if(editBtn){
-      editBtn.onclick = ()=>{
-        root.dataset.editing = tpl.id;
-        renderStaffTemplateReader();
-      };
-    }
+    document.getElementById('staffSendTemplateBtn').onclick = ()=>{
+      root.dataset.editing = '';
+      selectedTemplateId = tpl.id;
+      openTemplateSendModal(tpl.id);
+    };
 
-    if(sendBtn){
-      sendBtn.onclick = ()=>{
-        root.dataset.editing = '';
-        selectedTemplateId = tpl.id;
-        openTemplateSendModal(tpl.id);
-      };
-    }
+    document.getElementById('staffDeleteTemplateBtn').onclick = async ()=>{
+      state.templates = state.templates.filter(t => t.id !== tpl.id);
+      selectedTemplateId = '';
+      await saveState();
+      renderMailbox();
+    };
 
     return;
   }
@@ -3609,58 +3686,58 @@ function renderStaffTemplateReader(){
       <div style="width:100%">
         <input id="editTemplateSubject" type="text" style="width:100%;font-size:20px;font-weight:800;padding:8px;margin-bottom:10px">
         <div class="from-box">
-          <strong>From:</strong> ${esc(tpl.senderName)} &lt;${esc(tpl.senderEmail)}&gt;
+          <strong>From:</strong> ${esc(currentUser().displayName)} &lt;${esc(currentUser().email)}&gt;
         </div>
       </div>
+    </div>
+
+    <div class="field" style="margin-top:12px">
+      <label>Preview text</label>
+      <input id="editTemplatePreview" type="text">
     </div>
 
     <textarea id="editTemplateBody" style="width:100%;height:220px;margin-top:12px;padding:10px;font-size:14px;line-height:1.5"></textarea>
 
     <div class="row" style="margin-top:18px">
-      <button id="saveTemplateBtn" class="btn btn-primary">Save changes</button>
+      <button id="saveTemplateBtn" class="btn btn-primary">Save template</button>
       <button id="cancelEditTemplateBtn" class="btn-secondary">Cancel</button>
     </div>
+
+    <div id="staffTemplateMsg"></div>
   `;
 
   document.getElementById('editTemplateSubject').value = tpl.subject || '';
+  document.getElementById('editTemplatePreview').value = tpl.preview || '';
   document.getElementById('editTemplateBody').value = tpl.body || '';
 
-document.getElementById('saveTemplateBtn').onclick = async ()=>{
-  const subject = document.getElementById('editTemplateSubject').value.trim();
-  const body = document.getElementById('editTemplateBody').value.trim();
+  document.getElementById('saveTemplateBtn').onclick = async ()=>{
+    const subject = document.getElementById('editTemplateSubject').value.trim();
+    const preview = document.getElementById('editTemplatePreview').value.trim();
+    const body = document.getElementById('editTemplateBody').value.trim();
+    const msg = document.getElementById('staffTemplateMsg');
 
-  if(!subject || !body){
-    alert('Enter a subject and message body.');
-    return;
-  }
+    if(!subject || !body){
+      setMessage(msg,'warn','Enter a subject and message body.');
+      return;
+    }
 
-  if(tpl){
+    tpl.ownerId = currentUserId;
+    tpl.group = 'Staff templates';
+    tpl.type = 'internal';
+    tpl.senderName = currentUser().displayName;
+    tpl.senderEmail = currentUser().email;
     tpl.subject = subject;
+    tpl.preview = preview || body.slice(0,90);
     tpl.body = body;
-  } else {
-    const newTemplate = {
-      id: uid('tpl'),
-      group: selectedTemplateGroup || 'Everyday safe emails',
-      type: 'safe',
-      senderName: currentUser()?.displayName || 'Sender',
-      senderEmail: currentUser()?.email || 'sender@plcmail.com',
-      subject,
-      preview: body.slice(0,90),
-      body,
-      defaultFolder: 'inbox',
-      linkTarget: '',
-      hints: templateHintsForType ? templateHintsForType('safe') : []
-    };
+    tpl.defaultFolder = tpl.defaultFolder || 'inbox';
+    tpl.hints = templateHintsForType('internal');
 
-    state.templates.push(newTemplate);
-    selectedTemplateId = newTemplate.id;
-  }
+    await saveState();
 
-  await saveState();
-
-  if(root) root.dataset.editing = '';
-  renderAdmin ? renderAdmin() : renderMailbox();
-};
+    root.dataset.editing = '';
+    selectedTemplateId = tpl.id;
+    renderMailbox();
+  };
 
   document.getElementById('cancelEditTemplateBtn').onclick = ()=>{
     root.dataset.editing = '';
