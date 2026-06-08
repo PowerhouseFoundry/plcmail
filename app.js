@@ -280,6 +280,21 @@ function startFirestoreSync(){
   onSnapshot(PLCMAIL_DOC, (snapshot)=>{
     if(!snapshot.exists()) return;
 
+    const active = document.activeElement;
+    const isTyping =
+      active &&
+      (
+        active.tagName === 'INPUT' ||
+        active.tagName === 'TEXTAREA' ||
+        active.tagName === 'SELECT' ||
+        active.isContentEditable
+      );
+
+    if(composeMode && isTyping){
+      captureComposeDraft();
+      return;
+    }
+
     state = snapshot.data();
     ensureStateShape();
 
@@ -1946,6 +1961,7 @@ console.log("SEND DEBUG - after Firestore save", {
     latestSentRecipientId: verifyState.mailboxes[user.id]?.sent?.[0]?.recipientId
   }
 });
+clearComposeDraft();
 composeMode = null;
 composeSelectedTo = [];
 composeSelectedCc = [];
@@ -2163,6 +2179,36 @@ let staffCalendarTargetClassId = '';
 let mobileStudentTab = 'mail';
 let mobileStudentView = 'list'; // list | detail | calendar
 let mobileDrawerOpen = false;
+let composeDraft = {
+  subject: '',
+  body: ''
+};
+
+function captureComposeDraft(){
+  const subjectEl = document.getElementById('msgSubject');
+  const bodyEl = document.getElementById('msgText');
+
+  if(subjectEl) composeDraft.subject = subjectEl.value;
+  if(bodyEl) composeDraft.body = bodyEl.value;
+}
+
+function restoreComposeDraft(){
+  const subjectEl = document.getElementById('msgSubject');
+  const bodyEl = document.getElementById('msgText');
+
+  if(subjectEl) subjectEl.value = composeDraft.subject || '';
+  if(bodyEl) bodyEl.value = composeDraft.body || '';
+
+  if(subjectEl) subjectEl.oninput = captureComposeDraft;
+  if(bodyEl) bodyEl.oninput = captureComposeDraft;
+}
+
+function clearComposeDraft(){
+  composeDraft = {
+    subject: '',
+    body: ''
+  };
+}
 function migrateState(){
   state.settings = state.settings || {allowStudentToStudent:false};
   state.activityLog = Array.isArray(state.activityLog) ? state.activityLog : [];
@@ -3767,8 +3813,14 @@ function renderMailReader(){
 if(composeMode==='new'){
   root.innerHTML=renderComposeReply(null);
 
+  restoreComposeDraft();
+
   const c=document.getElementById('closeComposeBtn');
-  if(c) c.onclick=()=>{ composeMode=null; renderMailReader(); };
+  if(c) c.onclick=()=>{
+    clearComposeDraft();
+    composeMode=null;
+    renderMailReader();
+  };
 
   const s=document.getElementById('sendMsgBtn');
   if(s) s.onclick=sendCurrentMessage;
