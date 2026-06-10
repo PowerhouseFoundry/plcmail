@@ -2039,7 +2039,7 @@ return;
 
   setMessage(msg,'warn','Forwarding is limited in this build. Use New message to send to users or classes.');
 }
-function saveCurrentDraft(){
+async function saveCurrentDraft(){
 
   const user=currentUser();
 
@@ -2051,11 +2051,14 @@ function saveCurrentDraft(){
     document.getElementById('msgText')?.value.trim() ||
     '';
 
+  state.mailboxes[user.id].drafts = state.mailboxes[user.id].drafts || [];
+
   state.mailboxes[user.id].drafts.unshift({
     id:uid('mail'),
     senderId:user.id,
     senderName:user.displayName,
     senderEmail:user.email,
+    recipientId:'',
     subject,
     preview:body.slice(0,90),
     body,
@@ -2065,10 +2068,11 @@ function saveCurrentDraft(){
     category:'safe',
     timeLabel:shortTime(),
     sentAt:timestamp(),
-    attachments:[]
+    attachments:[],
+    replies:[]
   });
 
-  saveState();
+  await saveState();
 
   composeMode=null;
   renderMailbox();
