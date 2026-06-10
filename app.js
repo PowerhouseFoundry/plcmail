@@ -180,7 +180,7 @@ function ensureStateShape(){
     }
   });
   state.users.forEach(u=>{
-    if(!state.mailboxes[u.id]) state.mailboxes[u.id]={inbox:[],junk:[],deleted:[],sent:[]};
+    if(!state.mailboxes[u.id]) state.mailboxes[u.id]={inbox:[],junk:[],deleted:[],sent:[],drafts:[]};
     ['inbox','junk','deleted','sent'].forEach(f=>{ if(!Array.isArray(state.mailboxes[u.id][f])) state.mailboxes[u.id][f]=[]; });
     if(!state.events[u.id]) state.events[u.id]=[];
     if(typeof u.active === 'undefined') u.active = true;
@@ -209,7 +209,7 @@ function cleanDuplicateAccounts(){
       // Merge mailbox contents into the keeper account before removing duplicate.
       if(state.mailboxes?.[user.id]){
         if(!state.mailboxes[keeper.id]){
-          state.mailboxes[keeper.id] = { inbox:[], junk:[], deleted:[], sent:[] };
+          state.mailboxes[keeper.id] = { inbox:[], junk:[], deleted:[], sent:[], drafts:[] };
         }
 
         ['inbox', 'junk', 'deleted', 'sent'].forEach(folder => {
@@ -376,7 +376,7 @@ if(existingIndex >= 0){
 }
 
   if(!state.mailboxes[currentUserId]){
-    state.mailboxes[currentUserId] = { inbox:[], junk:[], deleted:[], sent:[] };
+    state.mailboxes[currentUserId] = { inbox:[], junk:[], deleted:[], sent:[], drafts:[] };
   }
   if(!state.events[currentUserId]){
     state.events[currentUserId] = [];
@@ -1169,7 +1169,7 @@ function openUserModal(defaultRole='student', userId=''){
         classId
       });
 
-      state.mailboxes[u.id]={inbox:[],junk:[],deleted:[],sent:[]};
+      state.mailboxes[u.id]={inbox:[],junk:[],deleted:[],sent:[],drafts:[]};
       state.events[u.id]=[];
     }
 
@@ -1802,7 +1802,10 @@ function renderComposeReply(mail){
               : 'Search people or classes and add multiple recipients.')
           : 'Your sent message will appear below the email.'}
       </div>
-      <button id="sendMsgBtn" class="btn btn-primary">Send</button>
+            <div class="row">
+        ${composeMode==='new' ? '<button id="saveDraftBtn" class="btn-secondary">Save draft</button>' : ''}
+        <button id="sendMsgBtn" class="btn btn-primary">Send</button>
+      </div>
     </div>
 
     <div id="composeReplyMsg"></div>
@@ -1876,10 +1879,26 @@ async function sendCurrentMessage(){
       return;
     }
 
-    if(!subject){
-      setMessage(msg,'warn','Enter a subject.');
-      return;
-    }
+if(!subject){
+  openModal(`
+    <h2>Missing subject</h2>
+    <p>Do you want to send this message without a subject?</p>
+    <div class="row">
+      <button id="sendNoSubjectBtn" class="btn btn-primary">Send</button>
+      <button id="cancelNoSubjectBtn" class="btn-secondary">Don't send</button>
+    </div>
+  `,'narrow');
+
+  document.getElementById('cancelNoSubjectBtn').onclick=closeModal;
+
+  document.getElementById('sendNoSubjectBtn').onclick=()=>{
+    closeModal();
+    document.getElementById('msgSubject').value='(No subject)';
+    sendCurrentMessage();
+  };
+
+  return;
+}
 
     const toUsers = composeSelectedTo.filter(x => x.type === 'user');
     const ccUsers = composeSelectedCc.filter(x => x.type === 'user');
@@ -2019,6 +2038,40 @@ return;
   }
 
   setMessage(msg,'warn','Forwarding is limited in this build. Use New message to send to users or classes.');
+}
+function saveCurrentDraft(){
+
+  const user=currentUser();
+
+  const subject=
+    document.getElementById('msgSubject')?.value.trim() ||
+    '(No subject)';
+
+  const body=
+    document.getElementById('msgText')?.value.trim() ||
+    '';
+
+  state.mailboxes[user.id].drafts.unshift({
+    id:uid('mail'),
+    senderId:user.id,
+    senderName:user.displayName,
+    senderEmail:user.email,
+    subject,
+    preview:body.slice(0,90),
+    body,
+    folder:'drafts',
+    read:true,
+    flagged:false,
+    category:'safe',
+    timeLabel:shortTime(),
+    sentAt:timestamp(),
+    attachments:[]
+  });
+
+  saveState();
+
+  composeMode=null;
+  renderMailbox();
 }
 function moveMail(newFolder){ const mail=currentMail(); if(!mail) return; const box=state.mailboxes[currentUserId][mailFolder]; const idx=box.findIndex(m=>m.id===mail.id); if(idx<0) return; box.splice(idx,1); mail.folder=newFolder; state.mailboxes[currentUserId][newFolder].unshift(mail); selectedMailId=null; saveState(); renderMailbox(); }
 function toggleFlag(){ const mail=currentMail(); if(!mail) return; mail.flagged=!mail.flagged; saveState(); renderMailbox(); }
@@ -2226,7 +2279,7 @@ function migrateState(){
   });
   state.events = state.events || {};
   state.users.forEach(u=>{
-    if(!state.mailboxes[u.id]) state.mailboxes[u.id] = {inbox:[], junk:[], deleted:[], sent:[]};
+    if(!state.mailboxes[u.id]) state.mailboxes[u.id] = {inbox:[], junk:[], deleted:[], sent:[],drafts:[]};
     if(!Array.isArray(state.events[u.id])) state.events[u.id] = [];
     if(state.events[u.id].some(ev => ev && !ev.date)) state.events[u.id] = [];
   });
@@ -2286,7 +2339,7 @@ function createInitialState(){
   ];
   const classes=[{id:mint,name:'Mint'},{id:peach,name:'Peach'},{id:amber,name:'Amber'},{id:teal,name:'Teal'},{id:sage,name:'Sage'},{id:orange,name:'Orange'}];
   const s={ users, logins, classes, templates:buildTemplates(), automations:[], mailboxes:{}, events:{}, activityLog:[], settings:{allowStudentToStudent:false}, meta:{lastAutomationRun:''} };
-  users.forEach(u=>{ s.mailboxes[u.id]={inbox:[],junk:[],deleted:[],sent:[]}; s.events[u.id]=[]; });
+  users.forEach(u=>{ s.mailboxes[u.id]={inbox:[],junk:[],deleted:[],sent:[],drafts:[]}; s.events[u.id]=[]; });
   seedDemoMail(s, teacher, staff, students);
   s.automations.push({id:uid('auto'), kind:'template', name:'Daily phishing practice',active:true,templateId:s.templates.find(t=>t.group==='Phishing / scam')?.id || '',frequency:'Daily',quantity:1,folder:'inbox',studentIds:[students[0].id,students[1].id],lastRun:'',createdBy:teacher.id});
   return s;
@@ -3463,7 +3516,14 @@ document.getElementById('saveStudentEvtBtn').onclick=()=>{
 }
 function renderMailList(){
   document.querySelectorAll('.folder-btn').forEach(btn=>btn.classList.toggle('active', btn.dataset.folder===mailFolder));
-  const titles={inbox:'Inbox',junk:'Junk Email',deleted:'Deleted Items',sent:'Sent Items',calendar:'Calendar'};
+const titles={
+  inbox:'Inbox',
+  junk:'Junk Email',
+  deleted:'Deleted Items',
+  sent:'Sent Items',
+  drafts:'Drafts',
+  calendar:'Calendar'
+};
   document.getElementById('folderTitle').textContent=titles[mailFolder];
   const list=document.getElementById('mailList');
   if(isStaffUser() && mailFolder==='templates'){
@@ -3824,7 +3884,8 @@ if(composeMode==='new'){
 
   const s=document.getElementById('sendMsgBtn');
   if(s) s.onclick=sendCurrentMessage;
-
+const draftBtn=document.getElementById('saveDraftBtn');
+if(draftBtn) draftBtn.onclick=saveCurrentDraft;
   bindComposeAddressField(root);
 
   return;
