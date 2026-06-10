@@ -907,7 +907,7 @@ function renderMailbox(){
 document.querySelectorAll('[data-folder="templates"]').forEach(btn=>{
   btn.style.display = user.role === 'student' ? 'none' : '';
 });
-  ['inbox','junk','deleted','sent'].forEach(k=>{
+  ['inbox','sent','drafts','junk','deleted'].forEach(k=>{
     const el=document.getElementById('count-'+k);
     if(el) el.textContent=counts[k];
   });
@@ -1880,19 +1880,18 @@ async function sendCurrentMessage(){
     }
 
 if(!subject){
-  openModal(`
-    <h2>Missing subject</h2>
-    <p>Do you want to send this message without a subject?</p>
-    <div class="row">
-      <button id="sendNoSubjectBtn" class="btn btn-primary">Send</button>
-      <button id="cancelNoSubjectBtn" class="btn-secondary">Don't send</button>
-    </div>
-  `,'narrow');
+  setMessage(msg,'warn',`
+    <strong>Missing subject</strong><br>
+    Do you want to send this message without a subject?<br><br>
+    <button id="sendNoSubjectBtn" class="btn btn-primary" type="button">Send</button>
+    <button id="cancelNoSubjectBtn" class="btn-secondary" type="button">Don't send</button>
+  `);
 
-  document.getElementById('cancelNoSubjectBtn').onclick=closeModal;
+  document.getElementById('cancelNoSubjectBtn').onclick=()=>{
+    msg.innerHTML='';
+  };
 
   document.getElementById('sendNoSubjectBtn').onclick=()=>{
-    closeModal();
     document.getElementById('msgSubject').value='(No subject)';
     sendCurrentMessage();
   };
@@ -3522,10 +3521,11 @@ function renderMailList(){
   document.querySelectorAll('.folder-btn').forEach(btn=>btn.classList.toggle('active', btn.dataset.folder===mailFolder));
 const titles={
   inbox:'Inbox',
-  junk:'Junk Email',
-  deleted:'Deleted Items',
   sent:'Sent Items',
   drafts:'Drafts',
+  junk:'Junk Email',
+  deleted:'Deleted Items',
+  templates:'Templates',
   calendar:'Calendar'
 };
   document.getElementById('folderTitle').textContent=titles[mailFolder];

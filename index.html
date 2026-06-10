@@ -58,24 +58,42 @@
       <div class="mail-layout">
         <aside class="mail-sidebar">
           <button id="newMailBtn" class="new-btn">New message</button>
-          <div class="folders">
-            <button class="folder-btn active" data-folder="inbox"><span class="folder-left"><span>📥</span><span>Inbox</span></span><span id="count-inbox" class="count">0</span></button>
-            <button class="folder-btn" data-folder="junk"><span class="folder-left"><span>🛡️</span><span>Junk Email</span></span><span id="count-junk" class="count">0</span></button>
-            <button class="folder-btn" data-folder="deleted"><span class="folder-left"><span>🗑️</span><span>Deleted Items</span></span><span id="count-deleted" class="count">0</span></button>
-            <button class="folder-btn" data-folder="sent"><span class="folder-left"><span>📤</span><span>Sent Items</span></span><span id="count-sent" class="count">0</span></button>
-            <button class="folder-btn" data-folder="drafts">
-  <span class="folder-left">
-    <span>📝</span>
-    <span>Drafts</span>
-  </span>
-  <span id="count-drafts" class="count">0</span>
-</button>
-            <button class="folder-btn" data-folder="templates">
-  <span class="folder-left"><span>🧩</span><span>Templates</span></span>
-  <span class="count">Library</span>
-</button>
-            <button class="folder-btn" data-folder="calendar"><span class="folder-left"><span>📅</span><span>Calendar</span></span><span class="count">7</span></button>
-          </div>
+<div class="folders">
+  <button class="folder-btn active" data-folder="inbox">
+    <span class="folder-left"><span>📥</span><span>Inbox</span></span>
+    <span id="count-inbox" class="count">0</span>
+  </button>
+
+  <button class="folder-btn" data-folder="sent">
+    <span class="folder-left"><span>📤</span><span>Sent Items</span></span>
+    <span id="count-sent" class="count">0</span>
+  </button>
+
+  <button class="folder-btn" data-folder="drafts">
+    <span class="folder-left"><span>📝</span><span>Drafts</span></span>
+    <span id="count-drafts" class="count">0</span>
+  </button>
+
+  <button class="folder-btn" data-folder="junk">
+    <span class="folder-left"><span>🛡️</span><span>Junk Email</span></span>
+    <span id="count-junk" class="count">0</span>
+  </button>
+
+  <button class="folder-btn" data-folder="deleted">
+    <span class="folder-left"><span>🗑️</span><span>Deleted Items</span></span>
+    <span id="count-deleted" class="count">0</span>
+  </button>
+
+  <button class="folder-btn" data-folder="templates">
+    <span class="folder-left"><span>🧩</span><span>Templates</span></span>
+    <span class="count">Library</span>
+  </button>
+
+  <button class="folder-btn" data-folder="calendar">
+    <span class="folder-left"><span>📅</span><span>Calendar</span></span>
+    <span class="count">7</span>
+  </button>
+</div>
           
         </aside>
         <section class="mail-list-panel">
