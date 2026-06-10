@@ -856,3 +856,31 @@
   font-size:12px !important;
   color:var(--muted) !important;
 }
+.missing-subject-popup{
+  position:fixed;
+  inset:0;
+  z-index:80;
+  display:grid;
+  place-items:center;
+  background:rgba(15,23,42,.25);
+  padding:18px;
+}
+
+.missing-subject-card{
+  width:min(420px,100%);
+  background:#fff;
+  border:1px solid var(--line);
+  border-radius:22px;
+  box-shadow:0 24px 70px rgba(15,23,42,.28);
+  padding:22px;
+}
+
+.missing-subject-card h3{
+  margin:0 0 8px;
+  font-size:20px;
+}
+
+.missing-subject-card p{
+  margin:0 0 18px;
+  color:var(--muted);
+}

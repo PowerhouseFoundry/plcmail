@@ -1525,7 +1525,17 @@ function openChangePasswordModal(){
   };
 }
 
-function folderCounts(uid){ const box=state.mailboxes[uid]; return {inbox:box.inbox.length,junk:box.junk.length,deleted:box.deleted.length,sent:box.sent.length}; }
+function folderCounts(uid){
+  const box=state.mailboxes[uid];
+
+  return {
+    inbox:(box.inbox || []).length,
+    sent:(box.sent || []).length,
+    drafts:(box.drafts || []).length,
+    junk:(box.junk || []).length,
+    deleted:(box.deleted || []).length
+  };
+}
 function currentMailItems(){ if(mailFolder==='calendar') return []; let items=state.mailboxes[currentUserId][mailFolder] || []; if(searchTerm.trim()){ const q=searchTerm.toLowerCase(); items=items.filter(m=>[m.senderName,m.senderEmail,m.subject,m.preview,m.body].join(' ').toLowerCase().includes(q)); } return items; }
 function currentMail(){ return (state.mailboxes[currentUserId][mailFolder]||[]).find(m=>m.id===selectedMailId) || null; }
 
@@ -1880,21 +1890,35 @@ async function sendCurrentMessage(){
     }
 
 if(!subject){
-  setMessage(msg,'warn',`
-    <strong>Missing subject</strong><br>
-    Do you want to send this message without a subject?<br><br>
-    <button id="sendNoSubjectBtn" class="btn btn-primary" type="button">Send</button>
-    <button id="cancelNoSubjectBtn" class="btn-secondary" type="button">Don't send</button>
-  `);
+  const composeBox = document.querySelector('.compose-box');
 
-  document.getElementById('cancelNoSubjectBtn').onclick=()=>{
-    msg.innerHTML='';
-  };
+  if(composeBox){
+    const oldPrompt = document.getElementById('missingSubjectPrompt');
+    if(oldPrompt) oldPrompt.remove();
 
-  document.getElementById('sendNoSubjectBtn').onclick=()=>{
-    document.getElementById('msgSubject').value='(No subject)';
-    sendCurrentMessage();
-  };
+    composeBox.insertAdjacentHTML('afterbegin', `
+      <div id="missingSubjectPrompt" class="missing-subject-popup">
+        <div class="missing-subject-card">
+          <h3>Missing subject</h3>
+          <p>Do you want to send this message without a subject?</p>
+          <div class="row" style="justify-content:flex-end">
+            <button id="sendNoSubjectBtn" class="btn btn-primary" type="button">Send</button>
+            <button id="cancelNoSubjectBtn" class="btn-secondary" type="button">Don’t send</button>
+          </div>
+        </div>
+      </div>
+    `);
+
+    document.getElementById('cancelNoSubjectBtn').onclick=()=>{
+      document.getElementById('missingSubjectPrompt')?.remove();
+    };
+
+    document.getElementById('sendNoSubjectBtn').onclick=()=>{
+      document.getElementById('missingSubjectPrompt')?.remove();
+      document.getElementById('msgSubject').value='(No subject)';
+      sendCurrentMessage();
+    };
+  }
 
   return;
 }
