@@ -2999,11 +2999,92 @@ async function collectRealAttachments(inputId='msgAttachments'){
 }
 function cloneAttachments(list){ return JSON.parse(JSON.stringify(list||[])); }
 function deliverTemplateToUser(s, tpl, userId, folderOverride=''){
-  const user=s.users.find(u=>u.id===userId); if(!tpl||!user) return; const folder=folderOverride || tpl.defaultFolder || 'inbox';
-  const labels={'fake-bank':'Verify account now','fake-delivery':'Pay redelivery fee','fake-tax':'Claim refund','fake-subscription':'Update payment','fake-email':'Increase mailbox storage','fake-paypal':'Review payment','fake-payment':'Pay now','fake-personal':'Open secure form'};
-  const body=String(tpl.body||'').replaceAll('{{name}}', user.displayName).replaceAll('{{ref}}','REF-40321').replaceAll('{{address}}','24 Station Road');
-  const mail={id:uid('mail'),senderId:null,senderName:tpl.senderName,senderEmail:tpl.senderEmail,recipientId:userId,subject:tpl.subject,preview:tpl.preview,body,folder,read:false,flagged:false,category:tpl.type,timeLabel:shortTime(),sentAt:timestamp(),linkTarget:tpl.linkTarget||'',linkLabel:labels[tpl.linkTarget]||tpl.linkLabel||'',hints:tpl.hints||[],attachments:cloneAttachments(tpl.attachments||[]),replies:[]};
+  const user=s.users.find(u=>u.id===userId);
+  if(!tpl || !user) return;
+
+  const folder=folderOverride || tpl.defaultFolder || 'inbox';
+
+  if(!s.mailboxes[userId]){
+    s.mailboxes[userId]={inbox:[],sent:[],drafts:[],junk:[],deleted:[]};
+  }
+
+  if(!s.mailboxes[userId][folder]){
+    s.mailboxes[userId][folder]=[];
+  }
+
+  const labels={
+    'fake-bank':'Verify account now',
+    'fake-delivery':'Pay redelivery fee',
+    'fake-tax':'Claim refund',
+    'fake-subscription':'Update payment',
+    'fake-email':'Increase mailbox storage',
+    'fake-paypal':'Review payment',
+    'fake-payment':'Pay now',
+    'fake-personal':'Open secure form'
+  };
+
+  const senderName = applyMailMergeText(tpl.senderName || 'Sender', user, tpl.senderName, tpl.senderEmail);
+  const senderEmail = applyMailMergeText(tpl.senderEmail || 'sender@plcmail.com', user, tpl.senderName, tpl.senderEmail);
+  const subject = applyMailMergeText(tpl.subject || '(No subject)', user, senderName, senderEmail);
+  const preview = applyMailMergeText(tpl.preview || '', user, senderName, senderEmail);
+  const body = applyMailMergeText(tpl.body || '', user, senderName, senderEmail);
+
+  const mail={
+    id:uid('mail'),
+    senderId:tpl.ownerId || null,
+    senderName,
+    senderEmail,
+    recipientId:userId,
+    recipientName:user.displayName,
+    recipientEmail:user.email,
+    subject,
+    preview,
+    body,
+    folder,
+    read:false,
+    flagged:false,
+    category:tpl.type || 'safe',
+    timeLabel:shortTime(),
+    sentAt:timestamp(),
+    linkTarget:tpl.linkTarget || '',
+    linkLabel:labels[tpl.linkTarget] || tpl.linkLabel || '',
+    hints:tpl.hints || [],
+    attachments:cloneAttachments(tpl.attachments || []),
+    replies:[]
+  };
+
   s.mailboxes[userId][folder].unshift(mail);
+}
+function mailMergeTokensHtml(){
+  return `<div class="soft-panel" style="margin:12px 0">
+    <div style="font-weight:800;margin-bottom:8px">Mail merge fields</div>
+    <div class="muted" style="margin-bottom:10px">Click a field to insert it into the email body. These can be deleted or changed like normal text.</div>
+    <div class="row">
+      ${['{{student_name}}','{{student_first_name}}','{{student_email}}','{{class_name}}','{{today}}','{{sender_name}}','{{sender_email}}'].map(t=>`
+        <button type="button" class="mini-btn" data-merge-token="${esc(t)}">${esc(t)}</button>
+      `).join('')}
+    </div>
+  </div>`;
+}
+
+function applyMailMergeText(text, student, senderName='', senderEmail=''){
+  const fullName = student?.displayName || '';
+  const firstName = fullName.split(' ')[0] || fullName;
+  const email = student?.email || '';
+  const cls = student?.classId ? className(student.classId) : '';
+  const today = new Date().toLocaleDateString('en-GB');
+
+  return String(text || '')
+    .replaceAll('{{name}}', fullName)
+    .replaceAll('{{student_name}}', fullName)
+    .replaceAll('{{student_first_name}}', firstName)
+    .replaceAll('{{student_email}}', email)
+    .replaceAll('{{class_name}}', cls)
+    .replaceAll('{{today}}', today)
+    .replaceAll('{{sender_name}}', senderName || '')
+    .replaceAll('{{sender_email}}', senderEmail || '')
+    .replaceAll('{{ref}}','REF-40321')
+    .replaceAll('{{address}}','24 Station Road');
 }
 function openAttachment(mail, attId){
   const a = (mail.attachments || []).find(x => x.id === attId);
@@ -3332,16 +3413,192 @@ function refreshStudents(){
 }
 function bindTemplateManagerPage(){
   bindAttachmentPicker('tplManageFiles','tplManageFileSummary');
-  const group=document.getElementById('tplManageGroup'); const tpl=document.getElementById('tplManageTemplate');
-  function updateList(){ const list=state.templates.filter(t=>t.group===group.value); tpl.innerHTML=list.map(t=>`<option value="${t.id}">${esc(t.subject)}</option>`).join(''); if(list.length) loadTemplate(); else clearForm(); }
-  function clearForm(){ ['tplManageSenderName','tplManageSenderEmail','tplManageSubject','tplManagePreview','tplManageBody'].forEach(id=>document.getElementById(id).value=''); document.getElementById('tplManageType').value='safe'; document.getElementById('tplManageFolder').value='inbox'; document.getElementById('tplManageLinkTarget').value=''; renderPreview(); }
-  function loadTemplate(){ const t=state.templates.find(x=>x.id===tpl.value); if(!t) return clearForm(); document.getElementById('tplManageType').value=t.type||'safe'; document.getElementById('tplManageSenderName').value=t.senderName||''; document.getElementById('tplManageSenderEmail').value=t.senderEmail||''; document.getElementById('tplManageSubject').value=t.subject||''; document.getElementById('tplManagePreview').value=t.preview||''; document.getElementById('tplManageBody').value=t.body||''; document.getElementById('tplManageFolder').value=t.defaultFolder||'inbox'; document.getElementById('tplManageLinkTarget').value=t.linkTarget||''; renderPreview(); }
-  function renderPreview(){ document.getElementById('tplManagePreviewBox').textContent=document.getElementById('tplManageBody').value||'Template preview will appear here.'; }
-  function values(){ return {group:group.value,type:document.getElementById('tplManageType').value,senderName:document.getElementById('tplManageSenderName').value.trim(),senderEmail:document.getElementById('tplManageSenderEmail').value.trim(),subject:document.getElementById('tplManageSubject').value.trim(),preview:document.getElementById('tplManagePreview').value.trim(),body:document.getElementById('tplManageBody').value,defaultFolder:document.getElementById('tplManageFolder').value,linkTarget:document.getElementById('tplManageLinkTarget').value}; }
-  group.onchange=updateList; tpl.onchange=loadTemplate; ['tplManageSenderName','tplManageSenderEmail','tplManageSubject','tplManagePreview','tplManageBody'].forEach(id=>document.getElementById(id).oninput=renderPreview);
+
+  const group=document.getElementById('tplManageGroup');
+  const tpl=document.getElementById('tplManageTemplate');
+  const previewBox=document.getElementById('tplManagePreviewBox');
+
+  const bodyField=document.getElementById('tplManageBody');
+
+  if(bodyField && !document.getElementById('tplMergeHelp')){
+    bodyField.insertAdjacentHTML('beforebegin', `<div id="tplMergeHelp">${mailMergeTokensHtml()}</div>`);
+  }
+
+  function insertAtCursor(field, text){
+    if(!field) return;
+    const start=field.selectionStart || 0;
+    const end=field.selectionEnd || 0;
+    field.value = field.value.slice(0,start) + text + field.value.slice(end);
+    field.focus();
+    field.selectionStart = field.selectionEnd = start + text.length;
+    renderPreview();
+  }
+
+  document.querySelectorAll('[data-merge-token]').forEach(btn=>{
+    btn.onclick=()=>insertAtCursor(document.getElementById('tplManageBody'), btn.dataset.mergeToken);
+  });
+
+  function templateList(){
+    return state.templates.filter(t=>t.group===group.value);
+  }
+
+  function updateList(){
+    const list=templateList();
+    tpl.innerHTML=list.map(t=>`<option value="${t.id}">${esc(t.subject || 'Untitled template')}</option>`).join('');
+
+    if(list.length){
+      loadTemplate();
+    } else {
+      clearForm();
+    }
+  }
+
+  function clearForm(){
+    document.getElementById('tplManageType').value='safe';
+    document.getElementById('tplManageSenderName').value='';
+    document.getElementById('tplManageSenderEmail').value='';
+    document.getElementById('tplManageSubject').value='';
+    document.getElementById('tplManagePreview').value='';
+    document.getElementById('tplManageBody').value=
+`Hello {{student_first_name}},
+
+Write your message here.
+
+Kind regards,
+
+{{sender_name}}`;
+    document.getElementById('tplManageFolder').value='inbox';
+    document.getElementById('tplManageLinkTarget').value='';
+    document.getElementById('tplManageAttachments').value='';
+    renderPreview();
+  }
+
+  function loadTemplate(){
+    const t=state.templates.find(x=>x.id===tpl.value);
+    if(!t) return clearForm();
+
+    document.getElementById('tplManageType').value=t.type || 'safe';
+    document.getElementById('tplManageSenderName').value=t.senderName || '';
+    document.getElementById('tplManageSenderEmail').value=t.senderEmail || '';
+    document.getElementById('tplManageSubject').value=t.subject || '';
+    document.getElementById('tplManagePreview').value=t.preview || '';
+    document.getElementById('tplManageBody').value=t.body || '';
+    document.getElementById('tplManageFolder').value=t.defaultFolder || 'inbox';
+    document.getElementById('tplManageLinkTarget').value=t.linkTarget || '';
+    renderPreview();
+  }
+
+  function previewStudent(){
+    return state.users.find(u=>u.role==='student' && u.active) || null;
+  }
+
+  function renderPreview(){
+    const student=previewStudent();
+    const senderName=document.getElementById('tplManageSenderName').value.trim();
+    const senderEmail=document.getElementById('tplManageSenderEmail').value.trim();
+    const subject=document.getElementById('tplManageSubject').value.trim();
+    const preview=document.getElementById('tplManagePreview').value.trim();
+    const body=document.getElementById('tplManageBody').value;
+
+    previewBox.innerHTML=`
+      <div style="font-weight:800;margin-bottom:8px">Learner preview</div>
+      <div class="from-box" style="margin:0 0 10px">
+        <strong>From:</strong> ${esc(applyMailMergeText(senderName || 'Sender', student, senderName, senderEmail))}
+        &lt;${esc(applyMailMergeText(senderEmail || 'sender@plcmail.com', student, senderName, senderEmail))}&gt;
+      </div>
+      <div style="font-weight:800">${esc(applyMailMergeText(subject || '(No subject)', student, senderName, senderEmail))}</div>
+      <div class="muted" style="margin:6px 0 12px">${esc(applyMailMergeText(preview || '', student, senderName, senderEmail))}</div>
+      <div style="white-space:pre-wrap;line-height:1.6">${autoLinkText(applyMailMergeText(body || '', student, senderName, senderEmail))}</div>
+    `;
+  }
+
+  function values(){
+    const senderName=document.getElementById('tplManageSenderName').value.trim();
+    const senderEmail=document.getElementById('tplManageSenderEmail').value.trim();
+
+    return {
+      group:group.value,
+      type:document.getElementById('tplManageType').value,
+      senderName:senderName || 'Sender',
+      senderEmail:senderEmail || 'sender@plcmail.com',
+      subject:document.getElementById('tplManageSubject').value.trim() || '(No subject)',
+      preview:document.getElementById('tplManagePreview').value.trim(),
+      body:document.getElementById('tplManageBody').value,
+      defaultFolder:document.getElementById('tplManageFolder').value,
+      linkTarget:document.getElementById('tplManageLinkTarget').value,
+      linkLabel:'',
+      hints:templateHintsForType(document.getElementById('tplManageType').value),
+      ownerId:currentUserId || ''
+    };
+  }
+
+  group.onchange=updateList;
+  tpl.onchange=loadTemplate;
+
+  [
+    'tplManageType',
+    'tplManageSenderName',
+    'tplManageSenderEmail',
+    'tplManageSubject',
+    'tplManagePreview',
+    'tplManageBody',
+    'tplManageFolder',
+    'tplManageLinkTarget'
+  ].forEach(id=>{
+    const el=document.getElementById(id);
+    if(el) el.oninput=renderPreview;
+    if(el) el.onchange=renderPreview;
+  });
+
   updateList();
-  document.getElementById('tplManageSaveChanges').onclick=async ()=>{ const t=state.templates.find(x=>x.id===tpl.value); if(!t){ setMessage(document.getElementById('tplManageMsg'),'warn','Choose an existing template first.'); return; } const v=values(); if(!v.subject||!v.body){ setMessage(document.getElementById('tplManageMsg'),'warn','Enter a subject and body.'); return; } Object.assign(t,v,{attachments:await collectFileAttachments('tplManageFiles','tplManageAttachments')}); saveState(); setMessage(document.getElementById('tplManageMsg'),'ok','Template updated.'); updateList(); };
-  document.getElementById('tplManageSaveNew').onclick=async ()=>{ const v=values(); if(!v.subject||!v.body){ setMessage(document.getElementById('tplManageMsg'),'warn','Enter a subject and body.'); return; } state.templates.push({...v,id:uid('tpl'),attachments:await collectFileAttachments('tplManageFiles','tplManageAttachments')}); saveState(); setMessage(document.getElementById('tplManageMsg'),'ok','New template saved.'); updateList(); tpl.value=state.templates[state.templates.length-1].id; loadTemplate(); };
+
+  document.getElementById('tplManageSaveChanges').onclick=async ()=>{
+    const t=state.templates.find(x=>x.id===tpl.value);
+
+    if(!t){
+      setMessage(document.getElementById('tplManageMsg'),'warn','Choose an existing template first, or use Save as new template.');
+      return;
+    }
+
+    const v=values();
+
+    if(!v.body.trim()){
+      setMessage(document.getElementById('tplManageMsg'),'warn','Enter a message body.');
+      return;
+    }
+
+    Object.assign(t,v,{
+      attachments:await collectFileAttachments('tplManageFiles','tplManageAttachments')
+    });
+
+    await saveState();
+    setMessage(document.getElementById('tplManageMsg'),'ok','Template updated.');
+    updateList();
+  };
+
+  document.getElementById('tplManageSaveNew').onclick=async ()=>{
+    const v=values();
+
+    if(!v.body.trim()){
+      setMessage(document.getElementById('tplManageMsg'),'warn','Enter a message body.');
+      return;
+    }
+
+    const newTemplate={
+      ...v,
+      id:uid('tpl'),
+      attachments:await collectFileAttachments('tplManageFiles','tplManageAttachments')
+    };
+
+    state.templates.push(newTemplate);
+
+    await saveState();
+
+    setMessage(document.getElementById('tplManageMsg'),'ok','New custom template saved.');
+    updateList();
+    tpl.value=newTemplate.id;
+    loadTemplate();
+  };
 }
 
 
