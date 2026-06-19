@@ -1188,14 +1188,112 @@ function openTemplatePreview(templateId){
 }
 
 function openTemplateEditModal(templateId){
-  const t=state.templates.find(x=>x.id===templateId); if(!t) return;
-  openModal(`<h2>Edit template</h2><div class="field"><label>Subject</label><input id="tplEditSubject" type="text" value="${esc(t.subject)}"></div><div class="field"><label>Preview text</label><input id="tplEditPreview" type="text" value="${esc(t.preview)}"></div><div class="field"><label>Body</label><textarea id="tplEditBody">${esc(t.body)}</textarea></div><div class="row"><button id="saveTplEditBtn" class="btn btn-primary">Save changes</button><button id="cancelTplEditBtn" class="btn-secondary">Cancel</button></div>`,'compact');
+  const t=state.templates.find(x=>x.id===templateId);
+  if(!t) return;
+
+  openModal(`<h2>Edit template</h2>
+
+    <div class="grid2">
+      <div class="field">
+        <label>Sender name</label>
+        <input id="tplEditSenderName" type="text" value="${esc(t.senderName || '')}">
+      </div>
+
+      <div class="field">
+        <label>Sender email</label>
+        <input id="tplEditSenderEmail" type="text" value="${esc(t.senderEmail || '')}">
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Subject</label>
+      <input id="tplEditSubject" type="text" value="${esc(t.subject || '')}">
+    </div>
+
+    <div class="field">
+      <label>Preview text</label>
+      <input id="tplEditPreview" type="text" value="${esc(t.preview || '')}">
+    </div>
+
+    <div class="soft-panel" style="margin-bottom:14px">
+      <div style="font-weight:800;margin-bottom:8px">Mail merge fields</div>
+      <div class="mini-note" style="margin-bottom:10px">Click a field to insert it. You can delete it like normal text.</div>
+      <div class="row">
+        <button class="mini-btn" data-token="{{student_name}}">Student name</button>
+        <button class="mini-btn" data-token="{{student_first_name}}">First name</button>
+        <button class="mini-btn" data-token="{{student_email}}">Student email</button>
+        <button class="mini-btn" data-token="{{class_name}}">Class</button>
+        <button class="mini-btn" data-token="{{today}}">Today</button>
+        <button class="mini-btn" data-token="{{sender_name}}">Sender name</button>
+      </div>
+    </div>
+
+    <div class="field">
+      <label>Body</label>
+      <textarea id="tplEditBody" style="min-height:260px">${esc(t.body || '')}</textarea>
+    </div>
+
+    <div class="template-preview-box" id="tplEditLivePreview"></div>
+
+    <div class="row" style="margin-top:14px">
+      <button id="saveTplEditBtn" class="btn btn-primary">Save changes</button>
+      <button id="cancelTplEditBtn" class="btn-secondary">Cancel</button>
+    </div>`,'compact');
+
+  const body=document.getElementById('tplEditBody');
+
+  function previewStudent(){
+    return state.users.find(u=>u.role==='student' && u.active) || null;
+  }
+
+  function renderEditPreview(){
+    const student=previewStudent();
+    const senderName=document.getElementById('tplEditSenderName').value.trim();
+    const senderEmail=document.getElementById('tplEditSenderEmail').value.trim();
+    const subject=document.getElementById('tplEditSubject').value.trim();
+    const preview=document.getElementById('tplEditPreview').value.trim();
+    const text=document.getElementById('tplEditBody').value;
+
+    document.getElementById('tplEditLivePreview').innerHTML=`
+      <strong>Learner preview</strong>
+      <div class="from-box" style="margin:10px 0">
+        <strong>From:</strong> ${esc(applyMailMergeText(senderName || 'Sender', student, senderName, senderEmail))}
+        &lt;${esc(applyMailMergeText(senderEmail || 'sender@plcmail.com', student, senderName, senderEmail))}&gt;
+      </div>
+      <div><strong>Subject:</strong> ${esc(applyMailMergeText(subject || '(No subject)', student, senderName, senderEmail))}</div>
+      <div class="muted" style="margin:8px 0">${esc(applyMailMergeText(preview || '', student, senderName, senderEmail))}</div>
+      <div style="white-space:pre-wrap;line-height:1.6">${autoLinkText(applyMailMergeText(text || '', student, senderName, senderEmail))}</div>
+    `;
+  }
+
+  document.querySelectorAll('[data-token]').forEach(btn=>{
+    btn.onclick=()=>{
+      const token=btn.dataset.token;
+      const start=body.selectionStart || 0;
+      const end=body.selectionEnd || 0;
+      body.value=body.value.slice(0,start)+token+body.value.slice(end);
+      body.focus();
+      body.selectionStart=body.selectionEnd=start+token.length;
+      renderEditPreview();
+    };
+  });
+
+  ['tplEditSenderName','tplEditSenderEmail','tplEditSubject','tplEditPreview','tplEditBody'].forEach(id=>{
+    document.getElementById(id).oninput=renderEditPreview;
+  });
+
+  renderEditPreview();
+
   document.getElementById('cancelTplEditBtn').onclick=closeModal;
-  document.getElementById('saveTplEditBtn').onclick=()=>{
-    t.subject=document.getElementById('tplEditSubject').value.trim() || t.subject;
-    t.preview=document.getElementById('tplEditPreview').value.trim() || t.preview;
+
+  document.getElementById('saveTplEditBtn').onclick=async ()=>{
+    t.senderName=document.getElementById('tplEditSenderName').value.trim() || 'Sender';
+    t.senderEmail=document.getElementById('tplEditSenderEmail').value.trim() || 'sender@plcmail.com';
+    t.subject=document.getElementById('tplEditSubject').value.trim() || '(No subject)';
+    t.preview=document.getElementById('tplEditPreview').value.trim();
     t.body=document.getElementById('tplEditBody').value;
-    saveState();
+
+    await saveState();
     closeModal();
     openTemplatePreview(templateId);
     if(adminSection==='library') renderAdmin();
