@@ -5,6 +5,7 @@ import {
   doc,
   getDoc,
   setDoc,
+  runTransaction,
   onSnapshot
 } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
@@ -34,6 +35,7 @@ export {
   doc,
   getDoc,
   setDoc,
+  runTransaction,
   onSnapshot,
   ref,
   uploadBytes,

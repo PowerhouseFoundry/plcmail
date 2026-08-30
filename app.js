@@ -4,6 +4,7 @@ import {
   doc,
   getDoc,
   setDoc,
+  runTransaction,
   onSnapshot,
   ref,
   uploadBytes,
@@ -41,6 +42,8 @@ function templateTypeForGroup(group){
 const PLCMAIL_DOC = doc(db, "plcMailState", "current");
 let startedFirestoreSync = false;
 let saveQueue = Promise.resolve();
+let pendingSaveCount = 0;
+let stateBase = null;
 let state = null;
 let currentUserId = null;
 let adminSection = 'dashboard';
@@ -101,20 +104,188 @@ function isTeacherUser(){
   return user && user.role === 'teacher';
 }
 function className(id){ return state.classes.find(c=>c.id===id)?.name || ''; }
+function cloneValue(value){
+  if(typeof value === 'undefined') return undefined;
+  return clone(value);
+}
+function valuesEqual(a, b){
+  if(a === b) return true;
+  if(typeof a === 'undefined' || typeof b === 'undefined') return false;
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+function isPlainObject(value){
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+function arrayUsesStableIds(...arrays){
+  const items = arrays.flat().filter(item => item !== null && typeof item !== 'undefined');
+  if(!items.length) return false;
+  return items.every(item => isPlainObject(item) && typeof item.id === 'string' && item.id);
+}
+function mergeAppendOnlyArray(base, local, remote){
+  if(valuesEqual(local, base)) return cloneValue(remote);
+  if(valuesEqual(remote, base)) return cloneValue(local);
+
+  const baseItems = Array.isArray(base) ? base : [];
+  const localItems = Array.isArray(local) ? local : [];
+  const remoteItems = Array.isArray(remote) ? remote : [];
+  const additions = localItems.slice(baseItems.length);
+  const result = cloneValue(remoteItems) || [];
+
+  additions.forEach(item => {
+    if(!result.some(existing => valuesEqual(existing, item))) result.push(cloneValue(item));
+  });
+
+  return result;
+}
+function mergeIdArray(base, local, remote, path){
+  const baseItems = Array.isArray(base) ? base : [];
+  const localItems = Array.isArray(local) ? local : [];
+  const remoteItems = Array.isArray(remote) ? remote : [];
+  const baseMap = new Map(baseItems.map(item => [item.id, item]));
+  const localMap = new Map(localItems.map(item => [item.id, item]));
+  const remoteMap = new Map(remoteItems.map(item => [item.id, item]));
+  const localDeleted = new Set(baseItems.filter(item => !localMap.has(item.id)).map(item => item.id));
+  const localAdded = localItems.filter(item => !baseMap.has(item.id));
+  const resultMap = new Map();
+
+  remoteItems.forEach(remoteItem => {
+    if(localDeleted.has(remoteItem.id)) return;
+    if(baseMap.has(remoteItem.id) && localMap.has(remoteItem.id)){
+      resultMap.set(
+        remoteItem.id,
+        mergeConcurrentValue(baseMap.get(remoteItem.id), localMap.get(remoteItem.id), remoteItem, [...path, remoteItem.id])
+      );
+    } else {
+      resultMap.set(remoteItem.id, cloneValue(remoteItem));
+    }
+  });
+
+  localAdded.forEach(localItem => {
+    if(remoteMap.has(localItem.id)){
+      resultMap.set(localItem.id, mergeConcurrentValue(undefined, localItem, remoteMap.get(localItem.id), [...path, localItem.id]));
+    } else {
+      resultMap.set(localItem.id, cloneValue(localItem));
+    }
+  });
+
+  localItems.forEach(localItem => {
+    if(!resultMap.has(localItem.id) && !localDeleted.has(localItem.id)){
+      resultMap.set(localItem.id, cloneValue(localItem));
+    }
+  });
+
+  const isMailboxArray = path[0] === 'mailboxes';
+  const orderedIds = [];
+  const pushId = id => { if(resultMap.has(id) && !orderedIds.includes(id)) orderedIds.push(id); };
+
+  if(isMailboxArray){
+    localAdded.forEach(item => pushId(item.id));
+    remoteItems.forEach(item => pushId(item.id));
+    localItems.forEach(item => pushId(item.id));
+  } else {
+    localItems.forEach(item => pushId(item.id));
+    remoteItems.forEach(item => pushId(item.id));
+  }
+
+  return orderedIds.map(id => resultMap.get(id));
+}
+function mergeConcurrentValue(base, local, remote, path=[]){
+  if(valuesEqual(local, base)) return cloneValue(remote);
+  if(valuesEqual(remote, base)) return cloneValue(local);
+
+  if(Array.isArray(local) || Array.isArray(base) || Array.isArray(remote)){
+    const baseArray = Array.isArray(base) ? base : [];
+    const localArray = Array.isArray(local) ? local : [];
+    const remoteArray = Array.isArray(remote) ? remote : [];
+
+    if(arrayUsesStableIds(baseArray, localArray, remoteArray)){
+      return mergeIdArray(baseArray, localArray, remoteArray, path);
+    }
+
+    if(path[path.length - 1] === 'replies'){
+      return mergeAppendOnlyArray(baseArray, localArray, remoteArray);
+    }
+
+    return cloneValue(localArray);
+  }
+
+  if(isPlainObject(local) || isPlainObject(base) || isPlainObject(remote)){
+    const baseObject = isPlainObject(base) ? base : {};
+    const localObject = isPlainObject(local) ? local : {};
+    const remoteObject = isPlainObject(remote) ? remote : {};
+    const result = {};
+    const keys = new Set([...Object.keys(baseObject), ...Object.keys(localObject), ...Object.keys(remoteObject)]);
+
+    keys.forEach(key => {
+      const baseHas = Object.prototype.hasOwnProperty.call(baseObject, key);
+      const localHas = Object.prototype.hasOwnProperty.call(localObject, key);
+      const remoteHas = Object.prototype.hasOwnProperty.call(remoteObject, key);
+
+      if(baseHas && !localHas){
+        // This device deliberately deleted the field. Keep the deletion even if another
+        // client edited the same field at the same time.
+        return;
+      }
+
+      if(!baseHas && !localHas){
+        if(remoteHas) result[key] = cloneValue(remoteObject[key]);
+        return;
+      }
+
+      const merged = mergeConcurrentValue(
+        baseHas ? baseObject[key] : undefined,
+        localHas ? localObject[key] : undefined,
+        remoteHas ? remoteObject[key] : undefined,
+        [...path, key]
+      );
+
+      if(typeof merged !== 'undefined') result[key] = merged;
+    });
+
+    return result;
+  }
+
+  // Both this device and the server changed the same simple value. The local action
+  // wins for that one field, while all unrelated remote changes are preserved above.
+  return cloneValue(local);
+}
 function saveState(){
   removeOldAttachmentDataUrls();
   cleanDuplicateAccounts();
   ensureStateShape();
-
-  const cleanState = clone(state);
-  state = cleanState;
+  pendingSaveCount += 1;
 
   const task = saveQueue.then(async () => {
-    await setDoc(PLCMAIL_DOC, cleanState);
+    const localSnapshot = clone(state);
+    const baseSnapshot = clone(stateBase || state);
+
+    const committedState = await runTransaction(db, async transaction => {
+      const latestSnapshot = await transaction.get(PLCMAIL_DOC);
+      const latestRemote = latestSnapshot.exists() ? latestSnapshot.data() : {};
+      const mergedState = mergeConcurrentValue(baseSnapshot, localSnapshot, latestRemote);
+
+      transaction.set(PLCMAIL_DOC, mergedState);
+      return mergedState;
+    });
+
+    const stateChangedWhileSaving = !valuesEqual(state, localSnapshot);
+    stateBase = clone(committedState);
+
+    if(stateChangedWhileSaving){
+      // Re-apply any local changes made while the transaction was in flight onto the
+      // committed server state. A queued save will then persist only those newer changes.
+      state = mergeConcurrentValue(localSnapshot, clone(state), committedState);
+    } else {
+      state = clone(committedState);
+    }
+
+    return committedState;
+  }).finally(() => {
+    pendingSaveCount = Math.max(0, pendingSaveCount - 1);
   });
 
   saveQueue = task.catch((error) => {
-    console.error("Failed to save PLC Mail state:", error);
+    console.error("Failed to save PLC Mail state safely:", error);
   });
 
   return task;
@@ -287,6 +458,7 @@ async function loadInitialStateFromFirestore(){
 
   if(snapshot.exists()){
     state = snapshot.data();
+    stateBase = clone(state);
     ensureStateShape();
     return state;
   }
@@ -294,6 +466,7 @@ async function loadInitialStateFromFirestore(){
   state = createInitialState();
   ensureStateShape();
   await setDoc(PLCMAIL_DOC, clone(state));
+  stateBase = clone(state);
   return state;
 }
 
@@ -303,6 +476,10 @@ function startFirestoreSync(){
 
   onSnapshot(PLCMAIL_DOC, (snapshot)=>{
     if(!snapshot.exists()) return;
+
+    // Do not let a server snapshot overwrite local changes while a transaction is queued
+    // or in flight. The transaction reads the newest server copy and merges it safely.
+    if(pendingSaveCount > 0) return;
 
     const active = document.activeElement;
     const isTyping =
@@ -320,6 +497,7 @@ function startFirestoreSync(){
     }
 
     state = snapshot.data();
+    stateBase = clone(state);
     ensureStateShape();
 
     if(currentUserId){
@@ -2478,7 +2656,6 @@ async function init(){
   await loadInitialStateFromFirestore();
   ensureStateShape();
   cleanDuplicateAccounts();
-await saveState();
   startFirestoreSync();
   document.getElementById('loginEmail').value = '';
   document.getElementById('loginPassword').value = '';
