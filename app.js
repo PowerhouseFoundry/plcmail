@@ -21,6 +21,23 @@ const fakePages = {
   'fake-email': { title:'Outlook Mailbox Upgrade', fields:['Email address','Password'] },
   'fake-paypal': { title:'PayPal Security Review', fields:['Email address','Password','Card number'] }
 };
+const FAKE_LINK_DEFAULT_LABELS = {
+  'fake-bank':'Verify account now',
+  'fake-delivery':'Pay redelivery fee',
+  'fake-tax':'Claim refund',
+  'fake-subscription':'Update payment',
+  'fake-email':'Increase mailbox storage',
+  'fake-paypal':'Review payment',
+  'fake-payment':'Pay now',
+  'fake-personal':'Open secure form'
+};
+function fakeLinkDefaultLabel(target){ return FAKE_LINK_DEFAULT_LABELS[target] || ''; }
+function templateTypeForGroup(group){
+  if(group==='Phishing / scam') return 'phishing';
+  if(group==='Spam / junk') return 'spam';
+  if(group==='Internal staff emails' || group==='Staff templates') return 'internal';
+  return 'safe';
+}
 const PLCMAIL_DOC = doc(db, "plcMailState", "current");
 let startedFirestoreSync = false;
 let saveQueue = Promise.resolve();
@@ -41,6 +58,13 @@ let monitoredMailboxFolder = 'inbox';
 let monitoredMailboxSelectedMailId = '';
 let studentManageClassId = '';
 let sendEmailMode = 'menu';
+let lastTemplateGroup = '';
+let lastTemplateId = '';
+let templateManagerUnsaved = false;
+let templateManagerSearchTerm = '';
+let templateManagerGroupFilter = '';
+let staffTemplateDraft = null;
+let staffTemplateSearchTerm = '';
 let composeSelectedTo = [];
 let composeSelectedCc = [];
 let composeRecipientMode = 'to';
@@ -388,6 +412,9 @@ if(existingIndex >= 0){
   renderApp();
 }
 function logout(){
+  if((templateManagerUnsaved || staffTemplateEditorDirty()) && !confirm('You have unsaved template changes. Sign out without saving them?')) return;
+  templateManagerUnsaved=false;
+  staffTemplateDraft=null;
   currentUserId = null;
   document.getElementById('appShell').classList.add('hidden');
   document.getElementById('loginOverlay').classList.remove('hidden');
@@ -942,7 +969,7 @@ document.querySelectorAll('[data-folder="templates"]').forEach(btn=>{
   }
 }
 function renderAdmin(){ renderAdminSidebar(); renderAdminMain(); }
-function templateGroupCounts(){ const m=new Map(); TEMPLATE_GROUPS.forEach(g=>m.set(g,0)); state.templates.forEach(t=>m.set(t.group,(m.get(t.group)||0)+1)); return Array.from(m.entries()).map(([group,count])=>({group,count})); }
+function templateGroupCounts(){ const m=new Map(); TEMPLATE_GROUPS.forEach(g=>m.set(g,0)); visibleTemplatesForCurrentUser().forEach(t=>{ if(m.has(t.group)) m.set(t.group,(m.get(t.group)||0)+1); }); return Array.from(m.entries()).map(([group,count])=>({group,count})); }
 function adminUsers(role){ return state.users.filter(u=>u.role===role); }
 function groupTagClass(group){ return group==='Phishing / scam'?'phishing':group==='Spam / junk'?'spam':group==='Internal staff emails'?'internal':'safe'; }
 function deleteUserPermanently(userId){
@@ -1315,11 +1342,12 @@ const templateId = initialTemplateId || availableTemplates[0]?.id || '';
         <select id="sendTplTemplate">
           ${availableTemplates.map(t=>`
             <option value="${t.id}" ${t.id===templateId ? 'selected' : ''}>
-              ${esc(t.group)} — ${esc(t.subject)}
+              ${esc(templateScopeLabel(t))} — ${esc(t.group)} — ${esc(t.subject)}
             </option>
           `).join('')}
         </select>
       </div>
+      <div id="sendTplPreview" class="template-preview-box compact-template-preview"></div>
 
       <div class="grid2">
         <div>
@@ -1406,6 +1434,25 @@ const templateId = initialTemplateId || availableTemplates[0]?.id || '';
 
   let recipientMode = 'class';
 
+  function sendModalPreviewStudent(){
+    const checked=studentList.querySelector('input:checked');
+    if(checked) return getUser(checked.value);
+    if(classSelect.value) return state.users.find(u=>u.role==='student' && u.active && u.classId===classSelect.value) || null;
+    return state.users.find(u=>u.role==='student' && u.active) || null;
+  }
+  function renderSendModalPreview(){
+    const template=availableTemplates.find(t=>t.id===templateSelect.value);
+    const typed=String(root.querySelector('#sendTplAttachments')?.value||'').split(',').map(x=>x.trim()).filter(Boolean);
+    const files=Array.from(root.querySelector('#sendTplFiles')?.files||[]).map(f=>f.name);
+    const box=root.querySelector('#sendTplPreview');
+    if(box) box.innerHTML=template ? templatePreviewHtml(template, sendModalPreviewStudent(), [...typed,...files]) : '<div class="muted">Choose a template to preview it.</div>';
+  }
+  function syncSendModalTemplate(){
+    const template=availableTemplates.find(t=>t.id===templateSelect.value);
+    if(template) folderSelect.value=template.defaultFolder || 'inbox';
+    renderSendModalPreview();
+  }
+
   function rebuildStudentList(){
     const ids = classSelect.value ? classStudentIds(classSelect.value) : [];
 
@@ -1442,6 +1489,8 @@ const templateId = initialTemplateId || availableTemplates[0]?.id || '';
         </label>
       `;
     }).join('');
+    studentList.querySelectorAll('input').forEach(i=>i.onchange=renderSendModalPreview);
+    renderSendModalPreview();
   }
 
   function setRecipientMode(mode){
@@ -1462,12 +1511,15 @@ const templateId = initialTemplateId || availableTemplates[0]?.id || '';
   });
 
   classSelect.onchange = ()=>{
-    if(recipientMode === 'selected'){
-      rebuildStudentList();
-    }
+    if(recipientMode === 'selected') rebuildStudentList();
+    renderSendModalPreview();
   };
+  templateSelect.onchange=syncSendModalTemplate;
+  attachmentsInput.oninput=renderSendModalPreview;
+  root.querySelector('#sendTplFiles').addEventListener('change',renderSendModalPreview);
 
   setRecipientMode('class');
+  syncSendModalTemplate();
 
   root.querySelector('#sendTplCancel').onclick = closeModal;
 
@@ -1504,7 +1556,7 @@ const templateId = initialTemplateId || availableTemplates[0]?.id || '';
     ids.forEach(id=>{
       deliverTemplateToUser(state, template, id, folder);
       if(attachments.length && state.mailboxes[id][folder] && state.mailboxes[id][folder][0]){
-        state.mailboxes[id][folder][0].attachments = attachments;
+        state.mailboxes[id][folder][0].attachments = [...cloneAttachments(template.attachments||[]), ...cloneAttachments(attachments)];
       }
     });
 
@@ -1612,6 +1664,14 @@ function openMailboxReview(userId){
   document.getElementById('closeReviewBtn').onclick=closeModal;
 }
 
+
+window.addEventListener('beforeunload', (event)=>{
+  if(templateManagerUnsaved || staffTemplateEditorDirty()){
+    event.preventDefault();
+    event.returnValue='';
+  }
+});
+
 function openChangePasswordModal(){
   const user=currentUser();
   openModal(`<h2>Change password</h2><div class="field"><label>Current password</label><input id="oldPw" type="password"></div><div class="field"><label>New password</label><input id="newPw" type="text"></div><div class="row"><button id="savePwBtn" class="btn btn-primary">Save password</button><button id="cancelPwBtn" class="btn-secondary">Cancel</button></div><div id="pwMsg"></div>`,'narrow');
@@ -1660,8 +1720,8 @@ function bodyHtml(mail){
   let safe = autoLinkText(mail.body || '');
 
   if(mail.linkTarget && mail.linkLabel){
-    safe = safe.replace(
-      '[[' + mail.linkLabel + ']]',
+    safe = safe.replaceAll(
+      esc('[[' + mail.linkLabel + ']]'),
       `<span class="email-link" data-link="${mail.linkTarget}">${esc(mail.linkLabel)}</span>`
     );
   }
@@ -2225,10 +2285,11 @@ function bindEvents(){
 if(quickComposeBtn){
   quickComposeBtn.onclick = async () => {
     if(isStaffUser() && mailFolder === 'templates'){
-      const tpl = createBlankStaffTemplate();
-      await saveState();
+      if(!canLeaveStaffTemplateEditor()) return;
+      staffTemplateDraft = createBlankStaffTemplate();
+      selectedTemplateId = staffTemplateDraft.id;
       const root=document.getElementById('readerInner');
-      if(root) root.dataset.editing = tpl.id;
+      if(root){ root.dataset.editing = staffTemplateDraft.id; root.dataset.templateDirty='0'; }
       renderMailbox();
       return;
     }
@@ -2266,6 +2327,8 @@ if(quickComposeBtn){
   });
 
   document.querySelectorAll('.folder-btn').forEach(btn=>btn.onclick=()=>{
+    if(isStaffUser() && mailFolder==='templates' && btn.dataset.folder!=='templates' && !canLeaveStaffTemplateEditor()) return;
+    if(isStaffUser() && mailFolder==='templates' && btn.dataset.folder!=='templates') staffTemplateDraft=null;
     mailFolder=btn.dataset.folder;
     selectedMailId=null;
     composeMode=null;
@@ -2392,8 +2455,8 @@ function migrateState(){
   state.activityLog = Array.isArray(state.activityLog) ? state.activityLog : [];
   state.templates = Array.isArray(state.templates) ? state.templates : buildTemplates();
   state.templates.forEach(t=>{
-    if(!t.group || !TEMPLATE_GROUPS.includes(t.group)) t.group = 'Everyday safe emails';
-    t.type = t.type || (t.group==='Phishing / scam' ? 'phishing' : t.group==='Spam / junk' ? 'spam' : t.group==='Internal staff emails' ? 'internal' : 'safe');
+    if(!t.group || (!TEMPLATE_GROUPS.includes(t.group) && t.group!=='Staff templates')) t.group = 'Everyday safe emails';
+    t.type = t.type || templateTypeForGroup(t.group);
     t.preview = t.preview || '';
     t.body = t.body || '';
     t.senderName = t.senderName || 'Sender';
@@ -3110,17 +3173,6 @@ function deliverTemplateToUser(s, tpl, userId, folderOverride=''){
     s.mailboxes[userId][folder]=[];
   }
 
-  const labels={
-    'fake-bank':'Verify account now',
-    'fake-delivery':'Pay redelivery fee',
-    'fake-tax':'Claim refund',
-    'fake-subscription':'Update payment',
-    'fake-email':'Increase mailbox storage',
-    'fake-paypal':'Review payment',
-    'fake-payment':'Pay now',
-    'fake-personal':'Open secure form'
-  };
-
   const senderName = applyMailMergeText(tpl.senderName || 'Sender', user, tpl.senderName, tpl.senderEmail);
   const senderEmail = applyMailMergeText(tpl.senderEmail || 'sender@plcmail.com', user, tpl.senderName, tpl.senderEmail);
   const subject = applyMailMergeText(tpl.subject || '(No subject)', user, senderName, senderEmail);
@@ -3145,7 +3197,7 @@ function deliverTemplateToUser(s, tpl, userId, folderOverride=''){
     timeLabel:shortTime(),
     sentAt:timestamp(),
     linkTarget:tpl.linkTarget || '',
-    linkLabel:labels[tpl.linkTarget] || tpl.linkLabel || '',
+    linkLabel:tpl.linkLabel || fakeLinkDefaultLabel(tpl.linkTarget) || '',
     hints:tpl.hints || [],
     attachments:cloneAttachments(tpl.attachments || []),
     replies:[]
@@ -3153,6 +3205,36 @@ function deliverTemplateToUser(s, tpl, userId, folderOverride=''){
 
   s.mailboxes[userId][folder].unshift(mail);
 }
+function templatePreviewBodyHtml(body, linkTarget='', linkLabel=''){
+  let safe = autoLinkText(body || '');
+  const label = linkLabel || fakeLinkDefaultLabel(linkTarget);
+  if(linkTarget && label){
+    const marker = esc('[[' + label + ']]');
+    safe = safe.replaceAll(marker, `<span class="email-link simulated-link-preview">${esc(label)}</span>`);
+  }
+  return safe;
+}
+function templatePreviewHtml(tpl, student=null, extraAttachmentNames=[]){
+  const previewStudent = student || state.users.find(u=>u.role==='student' && u.active) || null;
+  const senderName = applyMailMergeText(tpl?.senderName || 'Sender', previewStudent, tpl?.senderName || '', tpl?.senderEmail || '');
+  const senderEmail = applyMailMergeText(tpl?.senderEmail || 'sender@plcmail.com', previewStudent, tpl?.senderName || '', tpl?.senderEmail || '');
+  const subject = applyMailMergeText(tpl?.subject || '(No subject)', previewStudent, senderName, senderEmail);
+  const preview = applyMailMergeText(tpl?.preview || '', previewStudent, senderName, senderEmail);
+  const body = applyMailMergeText(tpl?.body || '', previewStudent, senderName, senderEmail);
+  const names = [
+    ...(tpl?.attachments || []).map(a=>a.filename).filter(Boolean),
+    ...(extraAttachmentNames || []).filter(Boolean)
+  ];
+  return `<div class="template-preview-email">
+    <div class="template-preview-kicker">Learner preview</div>
+    <div class="template-preview-from"><strong>From:</strong> ${esc(senderName)} &lt;${esc(senderEmail)}&gt;</div>
+    <div class="template-preview-subject">${esc(subject)}</div>
+    ${preview ? `<div class="template-preview-snippet">${esc(preview)}</div>` : ''}
+    <div class="template-preview-body">${templatePreviewBodyHtml(body, tpl?.linkTarget || '', tpl?.linkLabel || '')}</div>
+    ${names.length ? `<div class="template-preview-attachments"><strong>Attachments</strong>${names.map(name=>`<span class="attachment-chip">${esc(name)}</span>`).join('')}</div>` : ''}
+  </div>`;
+}
+
 function mailMergeTokensHtml(){
   return `<div class="soft-panel" style="margin:12px 0">
     <div style="font-weight:800;margin-bottom:8px">Mail merge fields</div>
@@ -3264,7 +3346,15 @@ function removeOldAttachmentDataUrls(){
 function renderAdminSidebar(){
   const items=[['dashboard','Dashboard'],['classes','Classes'],['students','Students'],['staff','Staff'],['inbox','Inbox'],['calendar_admin','Calendar'],['send','Send Email'],['mailboxes','Student Mailboxes'],['settings','Settings']];
   document.getElementById('adminSidebar').innerHTML=items.map(i=>'<button class="nav-btn '+(adminSection===i[0]?'active':'')+'" data-admin="'+i[0]+'">'+i[1]+'</button>').join('');
-  document.querySelectorAll('[data-admin]').forEach(b=>b.onclick=()=>{adminSection=b.dataset.admin; if(adminSection!=='send') sendEmailMode='menu'; renderAdmin();});
+  document.querySelectorAll('[data-admin]').forEach(b=>b.onclick=()=>{
+    if(templateManagerUnsaved && adminSection==='send' && sendEmailMode==='manage' && b.dataset.admin!=='send'){
+      if(!confirm('You have unsaved template changes. Leave without saving them?')) return;
+      templateManagerUnsaved=false;
+    }
+    adminSection=b.dataset.admin;
+    if(adminSection!=='send') sendEmailMode='menu';
+    renderAdmin();
+  });
 }
 function renderAdminMain(){
   const main=document.getElementById('adminMain');
@@ -3283,10 +3373,9 @@ function renderAdminMain(){
   if(adminSection==='send'){ renderSendPage(main); return; }
   if(adminSection==='mailboxes'){ renderMailboxAdmin(main, students); return; }
   if(adminSection==='settings'){
-    main.innerHTML=`<div class="stack"><div><h2 style="margin:0">Settings</h2><p class="muted">Local testing controls.</p></div><div class="grid2"><div class="panel"><h3 style="margin-top:0">Teacher account</h3><p class="muted">Email: teacher@plcmail.com</p><button id="teacherPwBtn" class="btn btn-primary">Change teacher password</button></div><div class="panel"><h3 style="margin-top:0">Student to student emailing</h3><p class="muted">Turn this on only during lessons.</p><label class="selector-item"><input id="settingsPeerToggle" type="checkbox" ${state.settings?.allowStudentToStudent?'checked':''}><div><div>Allow student to student emails</div><small>${state.settings?.allowStudentToStudent?'Students can currently email each other.':'Students can only email staff, teachers, and approved senders.'}</small></div></label></div><div class="panel"><h3 style="margin-top:0">Reset local data</h3><p class="muted">Clear all classes, users, mailboxes, and automations and return to the demo setup.</p><button id="fullResetBtn" class="btn-danger">Reset demo data</button></div></div></div>`;
+    main.innerHTML=`<div class="stack"><div><h2 style="margin:0">Settings</h2><p class="muted">Account and email settings for the live PLC Mail system.</p></div><div class="grid2"><div class="panel"><h3 style="margin-top:0">Teacher account</h3><p class="muted">Email: teacher@plcmail.com</p><button id="teacherPwBtn" class="btn btn-primary">Change teacher password</button></div><div class="panel"><h3 style="margin-top:0">Student to student emailing</h3><p class="muted">Turn this on only during lessons.</p><label class="selector-item"><input id="settingsPeerToggle" type="checkbox" ${state.settings?.allowStudentToStudent?'checked':''}><div><div>Allow student to student emails</div><small>${state.settings?.allowStudentToStudent?'Students can currently email each other.':'Students can only email staff, teachers, and approved senders.'}</small></div></label></div></div></div>`;
     document.getElementById('teacherPwBtn').onclick=()=>openChangePasswordModal();
     document.getElementById('settingsPeerToggle').onchange=(e)=>{ state.settings.allowStudentToStudent=e.target.checked; saveState(); renderAdmin(); };
-    document.getElementById('fullResetBtn').onclick=()=>{ resetDemo(); renderApp(); };
   }
 }
 function renderStaffAccountsPage(main){
@@ -3419,7 +3508,7 @@ function renderDashboardPage(main, students, staff){
 }
 function renderSendPage(main){
   const groups=templateGroupCounts();
-  main.innerHTML=`<div class="stack"><div class="split"><div><h2 style="margin:0">Send Email</h2><p class="muted">Choose a simpler template send, compose a new message, or manage templates.</p></div></div>${sendEmailMode==='menu' ? `<div class="grid3"><button class="panel group-card" id="openSendTemplatePage"><div class="tag internal">Send From Template</div><h3 style="margin:0">Choose a library email</h3><div class="muted">Pick a template, make quick edits, and send it.</div></button><button class="panel group-card" id="openComposePage"><div class="tag safe">Compose Email</div><h3 style="margin:0">Write a custom email</h3><div class="muted">Write your own message and optionally save it as an automation.</div></button><button class="panel group-card" id="openTemplateManagerPage"><div class="tag spam">Create Templates</div><h3 style="margin:0">Create or edit templates</h3><div class="muted">Use the full template builder with links and attachments.</div></button></div><div class="panel"><div class="split"><div><h3 style="margin:0">Existing automations</h3><div class="muted">Run, edit, or review saved automations.</div></div><button id="runAutoNowBtn" class="btn-secondary">Run automations now</button></div><div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>Name</th><th>Type</th><th>Students</th><th>Frequency</th><th>Qty</th><th>Status</th></tr></thead><tbody>${state.automations.length?state.automations.map(a=>`<tr><td>${esc(a.name)}</td><td>${esc(a.kind==='custom'?'Custom email':'Template')}</td><td>${esc((a.studentIds||[]).map(id=>getUser(id)?.displayName||'').join(', '))}</td><td>${esc(a.frequency)}</td><td>${esc(a.quantity)}</td><td>${a.active?'<span class="tag safe">Active</span>':'<span class="tag phishing">Paused</span>'}</td></tr>`).join(''):'<tr><td colspan="6" class="muted">No automations yet.</td></tr>'}</tbody></table></div></div>`:''}${sendEmailMode==='template' ? `<div class="panel"><div class="split"><div><h3 style="margin:0">Send From Template</h3><div class="muted">The template is already written. Make quick changes here if needed, then send it.</div></div><button id="sendBackBtn" class="btn-secondary">Back</button></div><div class="grid2" style="margin-top:14px"><div class="stack"><div class="field"><label>Template group</label><select id="sendPageGroup">${groups.map(g=>`<option value="${esc(g.group)}">${esc(g.group)}</option>`).join('')}</select></div><div class="field"><label>Template</label><select id="sendPageTemplate"></select></div><div class="field"><label>Subject</label><input id="sendPageSubject" type="text"></div><div class="field"><label>Preview text</label><input id="sendPagePreviewText" type="text"></div><div class="field"><label>Body</label><textarea id="sendPageBody" style="min-height:240px"></textarea></div></div><div class="stack"><div class="field"><label>Choose class</label><select id="sendPageClass"><option value="">Choose a class</option>${state.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div><div class="field"><label>Who should receive it?</label><div class="row"><label class="selector-item" style="flex:1"><input type="radio" name="sendPageMode" value="class" checked><div><div>Whole class</div><small>Send to all students in this class.</small></div></label><label class="selector-item" style="flex:1"><input type="radio" name="sendPageMode" value="selected"><div><div>Selected students</div><small>Reveal the list only when needed.</small></div></label></div></div><div id="sendPageStudentsWrap" class="field hidden"><label>Select students</label><div id="sendPageStudents" class="selector-list"></div></div><div class="field"><label>Destination folder</label><select id="sendPageFolder"><option value="inbox">Inbox</option><option value="junk">Junk Email</option><option value="deleted">Deleted Items</option></select></div><div class="field"><label>Type filenames manually</label><input id="sendPageAttachments" type="text" placeholder="e.g. worksheet.pdf, letter.docx"></div><div class="field"><label>Attach files</label><input id="sendPageFiles" type="file" multiple></div>${attachmentSummaryHtml('sendPageFileSummary')}<label class="selector-item"><input id="sendPageAutomationToggle" type="checkbox"><div><div>Make this an automation</div><small>Instead of sending once, save it to run automatically.</small></div></label><div id="sendPageAutomationFields" class="stack hidden" style="margin-top:14px"><div class="field"><label>Automation name</label><input id="sendPageAutoName" type="text" placeholder="Daily template send"></div><div class="field"><label>Frequency</label><select id="sendPageFrequency"><option>Daily</option><option>Weekdays</option><option>Weekly</option></select></div><div class="field"><label>Quantity</label><input id="sendPageQuantity" type="number" min="1" value="1"></div></div><div class="template-preview-box" id="sendPagePreview"></div><div class="row" style="margin-top:14px"><button id="sendPageSubmit" class="btn btn-primary">Send template</button><button id="sendPageSaveAutomation" class="btn-secondary hidden">Save automation</button></div><div id="sendPageMsg"></div></div></div></div>`:''}${sendEmailMode==='compose' ? `<div class="panel"><div class="split"><div><h3 style="margin:0">Compose Email</h3><div class="muted">Full page editor so the message is easier to read and write.</div></div><button id="sendBackBtn" class="btn-secondary">Back</button></div><div class="grid2" style="margin-top:14px"><div><div class="field"><label>From account</label><select id="composePageSender">${state.users.filter(u=>u.role==='teacher'||u.role==='staff').map(u=>`<option value="${u.id}">${esc(u.displayName)} (${esc(u.email)})</option>`).join('')}</select></div><div class="field"><label>Subject</label><input id="composePageSubject" type="text"></div><div class="field"><label>Message</label><textarea id="composePageBody" style="min-height:260px"></textarea></div><div class="field"><label>Type filenames manually</label><input id="composePageAttachments" type="text" placeholder="e.g. rota.docx, reminder.pdf"></div><div class="field"><label>Attach files</label><input id="composePageFiles" type="file" multiple></div>${attachmentSummaryHtml('composePageFileSummary')}</div><div><div class="field"><label>Choose class</label><select id="composePageClass"><option value="">Choose a class</option>${state.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div><div class="field"><label>Who should receive it?</label><div class="row"><label class="selector-item" style="flex:1"><input type="radio" name="composePageMode" value="class" checked><div><div>Whole class</div><small>Send to everyone in the class.</small></div></label><label class="selector-item" style="flex:1"><input type="radio" name="composePageMode" value="selected"><div><div>Selected students</div><small>Reveal students only when needed.</small></div></label></div></div><div id="composePageStudentsWrap" class="field hidden"><label>Select students</label><div id="composePageStudents" class="selector-list"></div></div><div class="field"><label>Destination folder</label><select id="composePageFolder"><option value="inbox">Inbox</option><option value="junk">Junk Email</option><option value="deleted">Deleted Items</option></select></div><label class="selector-item"><input id="composePageAutomationToggle" type="checkbox"><div><div>Make this an automation</div><small>Save this custom email to run automatically.</small></div></label><div id="composePageAutomationFields" class="stack hidden" style="margin-top:14px"><div class="field"><label>Automation name</label><input id="composePageAutoName" type="text" placeholder="Weekly reminder"></div><div class="field"><label>Frequency</label><select id="composePageFrequency"><option>Daily</option><option>Weekdays</option><option>Weekly</option></select></div><div class="field"><label>Quantity</label><input id="composePageQuantity" type="number" min="1" value="1"></div></div><div class="row" style="margin-top:14px"><button id="composePageSubmit" class="btn btn-primary">Send email</button><button id="composePageSaveAutomation" class="btn-secondary hidden">Save automation</button></div><div id="composePageMsg"></div></div></div></div>`:''}${sendEmailMode==='manage' ? `<div class="panel"><div class="split"><div><h3 style="margin:0">Create / Edit Templates</h3><div class="muted">Build your own templates with richer options.</div></div><button id="sendBackBtn" class="btn-secondary">Back</button></div><div class="grid2" style="margin-top:14px"><div class="template-editor"><div class="field"><label>Template group</label><select id="tplManageGroup">${groups.map(g=>`<option value="${esc(g.group)}">${esc(g.group)}</option>`).join('')}</select></div><div class="field"><label>Existing template</label><select id="tplManageTemplate"></select></div><div class="field"><label>Type</label><select id="tplManageType"><option value="safe">Safe</option><option value="internal">Internal</option><option value="spam">Spam</option><option value="phishing">Phishing</option></select></div><div class="field"><label>Sender name</label><input id="tplManageSenderName" type="text"></div><div class="field"><label>Sender email</label><input id="tplManageSenderEmail" type="text"></div><div class="field"><label>Subject</label><input id="tplManageSubject" type="text"></div><div class="field"><label>Preview text</label><input id="tplManagePreview" type="text"></div><div class="field"><label>Body</label><textarea id="tplManageBody" style="min-height:220px"></textarea></div></div><div class="template-editor"><div class="field"><label>Destination folder</label><select id="tplManageFolder"><option value="inbox">Inbox</option><option value="junk">Junk Email</option><option value="deleted">Deleted Items</option></select></div><div class="field"><label>Fake link type</label><select id="tplManageLinkTarget"><option value="">No fake link</option><option value="fake-payment">Payment page</option><option value="fake-email">Enter email and password</option><option value="fake-personal">Personal information form</option>${Object.keys(fakePages).map(k=>`<option value="${k}">${esc(fakePages[k].title)}</option>`).join('')}</select></div><div class="field"><label>Type filenames manually</label><input id="tplManageAttachments" type="text" placeholder="e.g. invoice.pdf, form.docx"></div><div class="field"><label>Attach files</label><input id="tplManageFiles" type="file" multiple></div>${attachmentSummaryHtml('tplManageFileSummary')}<div class="template-preview-box" id="tplManagePreviewBox"></div><div class="row"><button id="tplManageSaveChanges" class="btn btn-primary">Save changes</button><button id="tplManageSaveNew" class="btn-secondary">Save as new template</button></div><div id="tplManageMsg"></div></div></div></div>`:''}</div>`;
+  main.innerHTML=`<div class="stack"><div class="split"><div><h2 style="margin:0">Send Email</h2><p class="muted">Choose a simpler template send, compose a new message, or manage templates.</p></div></div>${sendEmailMode==='menu' ? `<div class="grid3"><button class="panel group-card" id="openSendTemplatePage"><div class="tag internal">Send From Template</div><h3 style="margin:0">Choose a library email</h3><div class="muted">Pick a template, make quick edits, and send it.</div></button><button class="panel group-card" id="openComposePage"><div class="tag safe">Compose Email</div><h3 style="margin:0">Write a custom email</h3><div class="muted">Write your own message and optionally save it as an automation.</div></button><button class="panel group-card" id="openTemplateManagerPage"><div class="tag spam">Template Library</div><h3 style="margin:0">Create and manage templates</h3><div class="muted">Build the shared master template bank with links, mail merge and attachments.</div></button></div><div class="panel"><div class="split"><div><h3 style="margin:0">Existing automations</h3><div class="muted">Run, edit, or review saved automations.</div></div><button id="runAutoNowBtn" class="btn-secondary">Run automations now</button></div><div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>Name</th><th>Type</th><th>Students</th><th>Frequency</th><th>Qty</th><th>Status</th></tr></thead><tbody>${state.automations.length?state.automations.map(a=>`<tr><td>${esc(a.name)}</td><td>${esc(a.kind==='custom'?'Custom email':'Template')}</td><td>${esc((a.studentIds||[]).map(id=>getUser(id)?.displayName||'').join(', '))}</td><td>${esc(a.frequency)}</td><td>${esc(a.quantity)}</td><td>${a.active?'<span class="tag safe">Active</span>':'<span class="tag phishing">Paused</span>'}</td></tr>`).join(''):'<tr><td colspan="6" class="muted">No automations yet.</td></tr>'}</tbody></table></div></div>`:''}${sendEmailMode==='template' ? `<div class="panel"><div class="split"><div><h3 style="margin:0">Send From Template</h3><div class="muted">The template is already written. Make quick changes here if needed, then send it.</div></div><button id="sendBackBtn" class="btn-secondary">Back</button></div><div class="grid2" style="margin-top:14px"><div class="stack"><div class="field"><label>Template group</label><select id="sendPageGroup">${groups.map(g=>`<option value="${esc(g.group)}">${esc(g.group)}</option>`).join('')}</select></div><div class="field"><label>Template</label><select id="sendPageTemplate"></select></div><div class="field"><label>Subject</label><input id="sendPageSubject" type="text"></div><div class="field"><label>Preview text</label><input id="sendPagePreviewText" type="text"></div><div class="field"><label>Body</label><textarea id="sendPageBody" style="min-height:240px"></textarea></div></div><div class="stack"><div class="field"><label>Choose class</label><select id="sendPageClass"><option value="">Choose a class</option>${state.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div><div class="field"><label>Who should receive it?</label><div class="row"><label class="selector-item" style="flex:1"><input type="radio" name="sendPageMode" value="class" checked><div><div>Whole class</div><small>Send to all students in this class.</small></div></label><label class="selector-item" style="flex:1"><input type="radio" name="sendPageMode" value="selected"><div><div>Selected students</div><small>Reveal the list only when needed.</small></div></label></div></div><div id="sendPageStudentsWrap" class="field hidden"><label>Select students</label><div id="sendPageStudents" class="selector-list"></div></div><div class="field"><label>Destination folder</label><select id="sendPageFolder"><option value="inbox">Inbox</option><option value="junk">Junk Email</option><option value="deleted">Deleted Items</option></select></div><div class="field"><label>Type filenames manually</label><input id="sendPageAttachments" type="text" placeholder="e.g. worksheet.pdf, letter.docx"></div><div class="field"><label>Attach files</label><input id="sendPageFiles" type="file" multiple></div>${attachmentSummaryHtml('sendPageFileSummary')}<label class="selector-item"><input id="sendPageAutomationToggle" type="checkbox"><div><div>Make this an automation</div><small>Instead of sending once, save it to run automatically.</small></div></label><div id="sendPageAutomationFields" class="stack hidden" style="margin-top:14px"><div class="field"><label>Automation name</label><input id="sendPageAutoName" type="text" placeholder="Daily template send"></div><div class="field"><label>Frequency</label><select id="sendPageFrequency"><option>Daily</option><option>Weekdays</option><option>Weekly</option></select></div><div class="field"><label>Quantity</label><input id="sendPageQuantity" type="number" min="1" value="1"></div></div><div class="template-preview-box" id="sendPagePreview"></div><div class="row" style="margin-top:14px"><button id="sendPageSubmit" class="btn btn-primary">Send template</button><button id="sendPageSaveAutomation" class="btn-secondary hidden">Save automation</button></div><div id="sendPageMsg"></div></div></div></div>`:''}${sendEmailMode==='compose' ? `<div class="panel"><div class="split"><div><h3 style="margin:0">Compose Email</h3><div class="muted">Full page editor so the message is easier to read and write.</div></div><button id="sendBackBtn" class="btn-secondary">Back</button></div><div class="grid2" style="margin-top:14px"><div><div class="field"><label>From account</label><select id="composePageSender">${state.users.filter(u=>u.role==='teacher'||u.role==='staff').map(u=>`<option value="${u.id}">${esc(u.displayName)} (${esc(u.email)})</option>`).join('')}</select></div><div class="field"><label>Subject</label><input id="composePageSubject" type="text"></div><div class="field"><label>Message</label><textarea id="composePageBody" style="min-height:260px"></textarea></div><div class="field"><label>Type filenames manually</label><input id="composePageAttachments" type="text" placeholder="e.g. rota.docx, reminder.pdf"></div><div class="field"><label>Attach files</label><input id="composePageFiles" type="file" multiple></div>${attachmentSummaryHtml('composePageFileSummary')}</div><div><div class="field"><label>Choose class</label><select id="composePageClass"><option value="">Choose a class</option>${state.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div><div class="field"><label>Who should receive it?</label><div class="row"><label class="selector-item" style="flex:1"><input type="radio" name="composePageMode" value="class" checked><div><div>Whole class</div><small>Send to everyone in the class.</small></div></label><label class="selector-item" style="flex:1"><input type="radio" name="composePageMode" value="selected"><div><div>Selected students</div><small>Reveal students only when needed.</small></div></label></div></div><div id="composePageStudentsWrap" class="field hidden"><label>Select students</label><div id="composePageStudents" class="selector-list"></div></div><div class="field"><label>Destination folder</label><select id="composePageFolder"><option value="inbox">Inbox</option><option value="junk">Junk Email</option><option value="deleted">Deleted Items</option></select></div><label class="selector-item"><input id="composePageAutomationToggle" type="checkbox"><div><div>Make this an automation</div><small>Save this custom email to run automatically.</small></div></label><div id="composePageAutomationFields" class="stack hidden" style="margin-top:14px"><div class="field"><label>Automation name</label><input id="composePageAutoName" type="text" placeholder="Weekly reminder"></div><div class="field"><label>Frequency</label><select id="composePageFrequency"><option>Daily</option><option>Weekdays</option><option>Weekly</option></select></div><div class="field"><label>Quantity</label><input id="composePageQuantity" type="number" min="1" value="1"></div></div><div class="row" style="margin-top:14px"><button id="composePageSubmit" class="btn btn-primary">Send email</button><button id="composePageSaveAutomation" class="btn-secondary hidden">Save automation</button></div><div id="composePageMsg"></div></div></div></div>`:''}${sendEmailMode==='manage' ? renderTemplateManagerPageHtml() : ''}</div>`;
   const back=document.getElementById('sendBackBtn'); if(back) back.onclick=()=>{ sendEmailMode='menu'; renderAdmin(); };
   const openT=document.getElementById('openSendTemplatePage'); if(openT) openT.onclick=()=>{ sendEmailMode='template'; renderAdmin(); };
   const openC=document.getElementById('openComposePage'); if(openC) openC.onclick=()=>{ sendEmailMode='compose'; renderAdmin(); };
@@ -3431,33 +3520,139 @@ function renderSendPage(main){
 }
 function bindSendTemplatePage(){
   bindAttachmentPicker('sendPageFiles','sendPageFileSummary');
-  const classSelect=document.getElementById('sendPageClass'); const studentsWrap=document.getElementById('sendPageStudentsWrap'); const students=document.getElementById('sendPageStudents');
-  const group=document.getElementById('sendPageGroup'); const tplSelect=document.getElementById('sendPageTemplate');
-  function fillTemplateList(){ const list=state.templates.filter(t=>t.group===group.value); tplSelect.innerHTML=list.map(t=>`<option value="${t.id}">${esc(t.subject)}</option>`).join(''); loadTemplate(); }
-  function loadTemplate(){ const t=state.templates.find(x=>x.id===tplSelect.value); if(!t) return; document.getElementById('sendPageSubject').value=t.subject||''; document.getElementById('sendPagePreviewText').value=t.preview||''; document.getElementById('sendPageBody').value=t.body||''; document.getElementById('sendPageFolder').value=t.defaultFolder||'inbox'; refreshPreview(); }
-  function refreshPreview(){ document.getElementById('sendPagePreview').textContent=document.getElementById('sendPageBody').value||'Preview will appear here.'; }
-  function refreshStudents(){ students.innerHTML=selectedSendClassStudentRows(classSelect.value); }
-  function syncMode(){ const selected=document.querySelector('input[name="sendPageMode"]:checked')?.value==='selected'; studentsWrap.classList.toggle('hidden', !selected); if(selected) refreshStudents(); }
-  function syncAutomation(){ const on=document.getElementById('sendPageAutomationToggle').checked; document.getElementById('sendPageAutomationFields').classList.toggle('hidden', !on); document.getElementById('sendPageSubmit').classList.toggle('hidden', on); document.getElementById('sendPageSaveAutomation').classList.toggle('hidden', !on); }
-  group.onchange=fillTemplateList; tplSelect.onchange=loadTemplate; classSelect.onchange=()=>{ if(!studentsWrap.classList.contains('hidden')) refreshStudents(); };
-  ['sendPageSubject','sendPagePreviewText','sendPageBody'].forEach(id=>document.getElementById(id).oninput=refreshPreview);
-  document.querySelectorAll('input[name="sendPageMode"]').forEach(r=>r.onchange=syncMode); document.getElementById('sendPageAutomationToggle').onchange=syncAutomation;
+  const classSelect=document.getElementById('sendPageClass');
+  const studentsWrap=document.getElementById('sendPageStudentsWrap');
+  const students=document.getElementById('sendPageStudents');
+  const group=document.getElementById('sendPageGroup');
+  const tplSelect=document.getElementById('sendPageTemplate');
+  const visible=visibleTemplatesForCurrentUser();
+
+  const availableGroups=TEMPLATE_GROUPS.filter(g=>visible.some(t=>t.group===g));
+  if(availableGroups.length){
+    group.innerHTML=availableGroups.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('');
+    const desiredGroup=(lastTemplateGroup && availableGroups.includes(lastTemplateGroup)) ? lastTemplateGroup : availableGroups[0];
+    group.value=desiredGroup;
+  }
+
+  function currentBase(){ return visible.find(t=>t.id===tplSelect.value) || null; }
+  function previewStudent(){
+    const classId=classSelect.value;
+    if(classId){
+      const checked=students.querySelector('input:checked');
+      if(checked) return getUser(checked.value);
+      return state.users.find(u=>u.role==='student' && u.active && u.classId===classId) || null;
+    }
+    return state.users.find(u=>u.role==='student' && u.active) || null;
+  }
+  function fillTemplateList(){
+    const list=visible.filter(t=>t.group===group.value);
+    tplSelect.innerHTML=list.map(t=>`<option value="${t.id}">${esc(t.subject)}</option>`).join('');
+    if(lastTemplateId && list.some(t=>t.id===lastTemplateId)) tplSelect.value=lastTemplateId;
+    else if(list[0]) tplSelect.value=list[0].id;
+    loadTemplate();
+  }
+  function loadTemplate(){
+    const t=currentBase();
+    if(!t){
+      document.getElementById('sendPageSubject').value='';
+      document.getElementById('sendPagePreviewText').value='';
+      document.getElementById('sendPageBody').value='';
+      refreshPreview();
+      return;
+    }
+    lastTemplateId=t.id;
+    lastTemplateGroup=t.group;
+    document.getElementById('sendPageSubject').value=t.subject||'';
+    document.getElementById('sendPagePreviewText').value=t.preview||'';
+    document.getElementById('sendPageBody').value=t.body||'';
+    document.getElementById('sendPageFolder').value=t.defaultFolder||'inbox';
+    refreshPreview();
+  }
+  function selectedExtraAttachmentNames(){
+    const typed=String(document.getElementById('sendPageAttachments')?.value||'').split(',').map(x=>x.trim()).filter(Boolean);
+    const files=Array.from(document.getElementById('sendPageFiles')?.files||[]).map(f=>f.name);
+    return [...typed,...files];
+  }
+  function refreshPreview(){
+    const base=currentBase();
+    const box=document.getElementById('sendPagePreview');
+    if(!base){ box.innerHTML='<div class="muted">Choose a template to preview it.</div>'; return; }
+    const draft={...base,
+      subject:document.getElementById('sendPageSubject').value,
+      preview:document.getElementById('sendPagePreviewText').value,
+      body:document.getElementById('sendPageBody').value,
+      defaultFolder:document.getElementById('sendPageFolder').value
+    };
+    box.innerHTML=templatePreviewHtml(draft, previewStudent(), selectedExtraAttachmentNames());
+  }
+  function refreshStudents(){
+    students.innerHTML=selectedSendClassStudentRows(classSelect.value);
+    students.querySelectorAll('input').forEach(i=>i.onchange=refreshPreview);
+  }
+  function syncMode(){
+    const selected=document.querySelector('input[name="sendPageMode"]:checked')?.value==='selected';
+    studentsWrap.classList.toggle('hidden', !selected);
+    if(selected) refreshStudents();
+    refreshPreview();
+  }
+  function syncAutomation(){
+    const on=document.getElementById('sendPageAutomationToggle').checked;
+    document.getElementById('sendPageAutomationFields').classList.toggle('hidden', !on);
+    document.getElementById('sendPageSubmit').classList.toggle('hidden', on);
+    document.getElementById('sendPageSaveAutomation').classList.toggle('hidden', !on);
+  }
+  group.onchange=()=>{ lastTemplateGroup=group.value; lastTemplateId=''; fillTemplateList(); };
+  tplSelect.onchange=()=>{ lastTemplateId=tplSelect.value; loadTemplate(); };
+  classSelect.onchange=()=>{ if(!studentsWrap.classList.contains('hidden')) refreshStudents(); refreshPreview(); };
+  ['sendPageSubject','sendPagePreviewText','sendPageBody','sendPageAttachments'].forEach(id=>{ const el=document.getElementById(id); if(el) el.oninput=refreshPreview; });
+  document.getElementById('sendPageFolder').onchange=refreshPreview;
+  document.getElementById('sendPageFiles').addEventListener('change',refreshPreview);
+  document.querySelectorAll('input[name="sendPageMode"]').forEach(r=>r.onchange=syncMode);
+  document.getElementById('sendPageAutomationToggle').onchange=syncAutomation;
   fillTemplateList(); syncMode(); syncAutomation();
+
   document.getElementById('sendPageSubmit').onclick=async ()=>{
-    const classId=classSelect.value; let ids=[]; if(!classId){ setMessage(document.getElementById('sendPageMsg'),'warn','Choose a class first.'); return; }
-    if(document.querySelector('input[name="sendPageMode"]:checked')?.value==='selected') ids=Array.from(students.querySelectorAll('input:checked')).map(i=>i.value); else ids=classStudentIds(classId);
+    const classId=classSelect.value;
+    let ids=[];
+    if(!classId){ setMessage(document.getElementById('sendPageMsg'),'warn','Choose a class first.'); return; }
+    if(document.querySelector('input[name="sendPageMode"]:checked')?.value==='selected') ids=Array.from(students.querySelectorAll('input:checked')).map(i=>i.value);
+    else ids=classStudentIds(classId);
     if(!ids.length){ setMessage(document.getElementById('sendPageMsg'),'warn','Choose at least one student.'); return; }
-    const base=state.templates.find(t=>t.id===tplSelect.value); const template={...base, subject:document.getElementById('sendPageSubject').value, preview:document.getElementById('sendPagePreviewText').value, body:document.getElementById('sendPageBody').value, defaultFolder:document.getElementById('sendPageFolder').value, attachments:await collectFileAttachments('sendPageFiles','sendPageAttachments')};
+    const base=currentBase();
+    if(!base){ setMessage(document.getElementById('sendPageMsg'),'warn','Choose a template first.'); return; }
+    const extras=await collectFileAttachments('sendPageFiles','sendPageAttachments');
+    const template={...base,
+      subject:document.getElementById('sendPageSubject').value,
+      preview:document.getElementById('sendPagePreviewText').value,
+      body:document.getElementById('sendPageBody').value,
+      defaultFolder:document.getElementById('sendPageFolder').value,
+      attachments:[...cloneAttachments(base.attachments||[]),...extras]
+    };
     ids.forEach(id=>deliverTemplateToUser(state, template, id, template.defaultFolder));
-    saveState(); setMessage(document.getElementById('sendPageMsg'),'ok','Template sent successfully.');
+    await saveState();
+    setMessage(document.getElementById('sendPageMsg'),'ok','Template sent successfully.');
   };
+
   document.getElementById('sendPageSaveAutomation').onclick=async ()=>{
-    const classId=classSelect.value; let ids=[]; if(!classId){ setMessage(document.getElementById('sendPageMsg'),'warn','Choose a class first.'); return; }
-    if(document.querySelector('input[name="sendPageMode"]:checked')?.value==='selected') ids=Array.from(students.querySelectorAll('input:checked')).map(i=>i.value); else ids=classStudentIds(classId);
+    const classId=classSelect.value;
+    let ids=[];
+    if(!classId){ setMessage(document.getElementById('sendPageMsg'),'warn','Choose a class first.'); return; }
+    if(document.querySelector('input[name="sendPageMode"]:checked')?.value==='selected') ids=Array.from(students.querySelectorAll('input:checked')).map(i=>i.value);
+    else ids=classStudentIds(classId);
     if(!ids.length){ setMessage(document.getElementById('sendPageMsg'),'warn','Choose at least one student.'); return; }
-    const base=state.templates.find(t=>t.id===tplSelect.value); const snap={...base, subject:document.getElementById('sendPageSubject').value, preview:document.getElementById('sendPagePreviewText').value, body:document.getElementById('sendPageBody').value, defaultFolder:document.getElementById('sendPageFolder').value, attachments:await collectFileAttachments('sendPageFiles','sendPageAttachments')};
+    const base=currentBase();
+    if(!base){ setMessage(document.getElementById('sendPageMsg'),'warn','Choose a template first.'); return; }
+    const extras=await collectFileAttachments('sendPageFiles','sendPageAttachments');
+    const snap={...base,
+      subject:document.getElementById('sendPageSubject').value,
+      preview:document.getElementById('sendPagePreviewText').value,
+      body:document.getElementById('sendPageBody').value,
+      defaultFolder:document.getElementById('sendPageFolder').value,
+      attachments:[...cloneAttachments(base.attachments||[]),...extras]
+    };
     state.automations.push({id:uid('auto'), kind:'template', name:document.getElementById('sendPageAutoName').value.trim()||'Template automation', active:true, templateId:base.id, templateSnapshot:snap, studentIds:ids, folder:snap.defaultFolder, frequency:document.getElementById('sendPageFrequency').value, quantity:Math.max(1, Number(document.getElementById('sendPageQuantity').value||1)), attachments:cloneAttachments(snap.attachments), lastRun:''});
-    saveState(); setMessage(document.getElementById('sendPageMsg'),'ok','Automation saved.');
+    await saveState();
+    setMessage(document.getElementById('sendPageMsg'),'ok','Automation saved.');
   };
 }
 function bindComposePage(){
@@ -3509,198 +3704,333 @@ function refreshStudents(){
     saveState(); setMessage(document.getElementById('composePageMsg'),'ok','Automation saved.');
   };
 }
+function renderTemplateManagerPageHtml(){
+  const fakeOptions=Object.keys(fakePages).map(k=>`<option value="${k}">${esc(fakePages[k].title)}</option>`).join('');
+  return `<div class="panel template-manager-panel">
+    <div class="split template-manager-heading">
+      <div>
+        <h3 style="margin:0">Template Library</h3>
+        <div class="muted">Templates created in the Teacher account are shared with every staff account.</div>
+      </div>
+      <div class="row">
+        <button id="tplManageNew" class="btn btn-primary">+ New Template</button>
+        <button id="sendBackBtn" class="btn-secondary">Back</button>
+      </div>
+    </div>
+
+    <div class="template-manager-layout">
+      <aside class="template-library-pane">
+        <div class="field">
+          <label>Search templates</label>
+          <input id="tplManageSearch" type="search" placeholder="Search by subject or sender">
+        </div>
+        <div class="field">
+          <label>Show group</label>
+          <select id="tplManageGroupFilter">
+            <option value="">All groups</option>
+            ${TEMPLATE_GROUPS.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}
+          </select>
+        </div>
+        <div id="tplManageLibrary" class="template-library-list"></div>
+      </aside>
+
+      <section class="template-editor-pane">
+        <div class="template-editor-topline">
+          <div>
+            <div id="tplManageModeLabel" class="template-editor-mode">Editing shared template</div>
+            <div id="tplManageOwnership" class="muted">Shared with all staff</div>
+          </div>
+          <div class="row">
+            <button id="tplManageDuplicate" class="btn-secondary">Duplicate</button>
+            <button id="tplManageDelete" class="btn-danger">Delete</button>
+          </div>
+        </div>
+
+        <div class="grid2 template-editor-fields">
+          <div class="field">
+            <label>Template group</label>
+            <select id="tplManageGroup">${TEMPLATE_GROUPS.map(g=>`<option value="${esc(g)}">${esc(g)}</option>`).join('')}</select>
+          </div>
+          <div class="field">
+            <label>Email type</label>
+            <div id="tplManageTypeLabel" class="template-type-display"></div>
+          </div>
+          <div class="field"><label>Sender name</label><input id="tplManageSenderName" type="text" placeholder="e.g. Powerhouse Reception"></div>
+          <div class="field"><label>Sender email</label><input id="tplManageSenderEmail" type="text" placeholder="e.g. reception@plcmail.com"></div>
+        </div>
+
+        <div class="field"><label>Subject</label><input id="tplManageSubject" type="text" placeholder="Email subject"></div>
+        <div class="field"><label>Preview text</label><input id="tplManagePreview" type="text" placeholder="Short inbox preview"></div>
+        <div id="tplMergeHelp">${mailMergeTokensHtml()}</div>
+        <div class="field"><label>Email body</label><textarea id="tplManageBody" class="template-body-editor"></textarea></div>
+
+        <div class="simulated-link-panel">
+          <div class="split">
+            <div>
+              <strong>Simulated training link</strong>
+              <div class="muted">Optional. Choose a training page, enter the words the learner will see, then insert it into the email.</div>
+            </div>
+            <span class="tag phishing">Training only</span>
+          </div>
+          <div class="grid2" style="margin-top:12px">
+            <div class="field">
+              <label>Link destination</label>
+              <select id="tplManageLinkTarget"><option value="">No simulated link</option>${fakeOptions}</select>
+            </div>
+            <div class="field">
+              <label>Link text</label>
+              <input id="tplManageLinkLabel" type="text" placeholder="e.g. Rebook my delivery">
+            </div>
+          </div>
+          <button id="tplManageInsertLink" class="btn-secondary" type="button">Insert / Update Link in Email</button>
+          <div id="tplManageLinkHelp" class="mini-note" style="margin-top:8px">The link will appear in the email body and the learner preview.</div>
+        </div>
+
+        <div class="grid2" style="margin-top:14px">
+          <div class="field"><label>Destination folder</label><select id="tplManageFolder"><option value="inbox">Inbox</option><option value="junk">Junk Email</option><option value="deleted">Deleted Items</option></select></div>
+          <div class="field"><label>Simulated attachment filenames</label><input id="tplManageAttachments" type="text" placeholder="e.g. invoice.pdf, form.docx"></div>
+        </div>
+        <div class="field"><label>Attach real files</label><input id="tplManageFiles" type="file" multiple></div>
+        ${attachmentSummaryHtml('tplManageFileSummary')}
+        <div id="tplManageExistingAttachments" class="existing-attachments-box"></div>
+
+        <div id="tplManagePreviewBox" class="template-preview-box template-manager-preview"></div>
+        <div class="template-save-bar">
+          <div id="tplManageDirtyNote" class="mini-note"></div>
+          <button id="tplManageSave" class="btn btn-primary">Save Template</button>
+        </div>
+        <div id="tplManageMsg"></div>
+      </section>
+    </div>
+  </div>`;
+}
 function bindTemplateManagerPage(){
   bindAttachmentPicker('tplManageFiles','tplManageFileSummary');
 
+  const search=document.getElementById('tplManageSearch');
+  const groupFilter=document.getElementById('tplManageGroupFilter');
+  const library=document.getElementById('tplManageLibrary');
   const group=document.getElementById('tplManageGroup');
-  const tpl=document.getElementById('tplManageTemplate');
-  const previewBox=document.getElementById('tplManagePreviewBox');
-
   const bodyField=document.getElementById('tplManageBody');
+  const previewBox=document.getElementById('tplManagePreviewBox');
+  const linkTarget=document.getElementById('tplManageLinkTarget');
+  const linkLabel=document.getElementById('tplManageLinkLabel');
+  const msg=document.getElementById('tplManageMsg');
 
-  if(bodyField && !document.getElementById('tplMergeHelp')){
-    bodyField.insertAdjacentHTML('beforebegin', `<div id="tplMergeHelp">${mailMergeTokensHtml()}</div>`);
+  const sharedTemplates=()=>visibleTemplatesForCurrentUser().filter(isSharedTemplate);
+  let selectedId=(lastTemplateId && sharedTemplates().some(t=>t.id===lastTemplateId)) ? lastTemplateId : (sharedTemplates()[0]?.id || '');
+  let mode=selectedId ? 'edit' : 'new';
+  let existingAttachments=[];
+  let currentMarkerLabel='';
+
+  search.value=templateManagerSearchTerm;
+  groupFilter.value=templateManagerGroupFilter;
+
+  function setDirty(on=true){
+    templateManagerUnsaved=!!on;
+    document.getElementById('tplManageDirtyNote').textContent=templateManagerUnsaved ? 'Unsaved changes' : 'All changes saved';
   }
-
-  function insertAtCursor(field, text){
-    if(!field) return;
-    const start=field.selectionStart || 0;
-    const end=field.selectionEnd || 0;
-    field.value = field.value.slice(0,start) + text + field.value.slice(end);
-    field.focus();
-    field.selectionStart = field.selectionEnd = start + text.length;
-    renderPreview();
+  function canDiscard(){
+    if(!templateManagerUnsaved) return true;
+    return confirm('You have unsaved template changes. Discard them?');
   }
-
-  document.querySelectorAll('[data-merge-token]').forEach(btn=>{
-    btn.onclick=()=>insertAtCursor(document.getElementById('tplManageBody'), btn.dataset.mergeToken);
-  });
-
-  function templateList(){
-    return state.templates.filter(t=>t.group===group.value);
+  function currentTemplate(){ return sharedTemplates().find(t=>t.id===selectedId) || null; }
+  function typeLabel(type){ return type==='phishing'?'Phishing / scam':type==='spam'?'Spam / junk':type==='internal'?'Internal':'Safe'; }
+  function updateTypeDisplay(){
+    const type=templateTypeForGroup(group.value);
+    const el=document.getElementById('tplManageTypeLabel');
+    el.innerHTML=`<span class="tag ${type}">${esc(typeLabel(type))}</span><span class="mini-note">Set automatically from the group</span>`;
   }
-
-  function updateList(){
-    const list=templateList();
-    tpl.innerHTML=list.map(t=>`<option value="${t.id}">${esc(t.subject || 'Untitled template')}</option>`).join('');
-
-    if(list.length){
-      loadTemplate();
-    } else {
-      clearForm();
-    }
+  function previewStudent(){ return state.users.find(u=>u.role==='student' && u.active) || null; }
+  function extraAttachmentNames(){
+    const typed=String(document.getElementById('tplManageAttachments').value||'').split(',').map(x=>x.trim()).filter(Boolean);
+    const files=Array.from(document.getElementById('tplManageFiles').files||[]).map(f=>f.name);
+    return [...typed,...files];
   }
-
-  function clearForm(){
-    document.getElementById('tplManageType').value='safe';
-    document.getElementById('tplManageSenderName').value='';
-    document.getElementById('tplManageSenderEmail').value='';
-    document.getElementById('tplManageSubject').value='';
-    document.getElementById('tplManagePreview').value='';
-    document.getElementById('tplManageBody').value=
-`Hello {{student_first_name}},
-
-Write your message here.
-
-Kind regards,
-
-{{sender_name}}`;
-    document.getElementById('tplManageFolder').value='inbox';
-    document.getElementById('tplManageLinkTarget').value='';
-    document.getElementById('tplManageAttachments').value='';
-    renderPreview();
-  }
-
-  function loadTemplate(){
-    const t=state.templates.find(x=>x.id===tpl.value);
-    if(!t) return clearForm();
-
-    document.getElementById('tplManageType').value=t.type || 'safe';
-    document.getElementById('tplManageSenderName').value=t.senderName || '';
-    document.getElementById('tplManageSenderEmail').value=t.senderEmail || '';
-    document.getElementById('tplManageSubject').value=t.subject || '';
-    document.getElementById('tplManagePreview').value=t.preview || '';
-    document.getElementById('tplManageBody').value=t.body || '';
-    document.getElementById('tplManageFolder').value=t.defaultFolder || 'inbox';
-    document.getElementById('tplManageLinkTarget').value=t.linkTarget || '';
-    renderPreview();
-  }
-
-  function previewStudent(){
-    return state.users.find(u=>u.role==='student' && u.active) || null;
-  }
-
-  function renderPreview(){
-    const student=previewStudent();
-    const senderName=document.getElementById('tplManageSenderName').value.trim();
-    const senderEmail=document.getElementById('tplManageSenderEmail').value.trim();
-    const subject=document.getElementById('tplManageSubject').value.trim();
-    const preview=document.getElementById('tplManagePreview').value.trim();
-    const body=document.getElementById('tplManageBody').value;
-
-    previewBox.innerHTML=`
-      <div style="font-weight:800;margin-bottom:8px">Learner preview</div>
-      <div class="from-box" style="margin:0 0 10px">
-        <strong>From:</strong> ${esc(applyMailMergeText(senderName || 'Sender', student, senderName, senderEmail))}
-        &lt;${esc(applyMailMergeText(senderEmail || 'sender@plcmail.com', student, senderName, senderEmail))}&gt;
-      </div>
-      <div style="font-weight:800">${esc(applyMailMergeText(subject || '(No subject)', student, senderName, senderEmail))}</div>
-      <div class="muted" style="margin:6px 0 12px">${esc(applyMailMergeText(preview || '', student, senderName, senderEmail))}</div>
-      <div style="white-space:pre-wrap;line-height:1.6">${autoLinkText(applyMailMergeText(body || '', student, senderName, senderEmail))}</div>
-    `;
-  }
-
-  function values(){
-    const senderName=document.getElementById('tplManageSenderName').value.trim();
-    const senderEmail=document.getElementById('tplManageSenderEmail').value.trim();
-
+  function draftValues(){
+    const senderName=document.getElementById('tplManageSenderName').value.trim() || 'Sender';
+    const senderEmail=document.getElementById('tplManageSenderEmail').value.trim() || 'sender@plcmail.com';
     return {
       group:group.value,
-      type:document.getElementById('tplManageType').value,
-      senderName:senderName || 'Sender',
-      senderEmail:senderEmail || 'sender@plcmail.com',
-      subject:document.getElementById('tplManageSubject').value.trim() || '(No subject)',
+      type:templateTypeForGroup(group.value),
+      senderName,
+      senderEmail,
+      subject:document.getElementById('tplManageSubject').value.trim(),
       preview:document.getElementById('tplManagePreview').value.trim(),
-      body:document.getElementById('tplManageBody').value,
+      body:bodyField.value,
       defaultFolder:document.getElementById('tplManageFolder').value,
-      linkTarget:document.getElementById('tplManageLinkTarget').value,
-      linkLabel:'',
-      hints:templateHintsForType(document.getElementById('tplManageType').value),
+      linkTarget:linkTarget.value,
+      linkLabel:linkTarget.value ? (linkLabel.value.trim() || fakeLinkDefaultLabel(linkTarget.value)) : '',
+      hints:templateHintsForType(templateTypeForGroup(group.value)),
       ownerId:currentUserId || ''
     };
   }
+  function renderPreview(){
+    const v=draftValues();
+    previewBox.innerHTML=templatePreviewHtml({...v,attachments:existingAttachments}, previewStudent(), extraAttachmentNames());
+  }
+  function renderExistingAttachments(){
+    const box=document.getElementById('tplManageExistingAttachments');
+    if(!existingAttachments.length){ box.innerHTML='<div class="muted">No saved attachments on this template.</div>'; return; }
+    box.innerHTML=`<div class="existing-attachments-title">Saved attachments</div>${existingAttachments.map((a,i)=>`<div class="existing-attachment-row"><div><strong>${esc(a.filename||'Attachment')}</strong><div class="mini-note">${esc(a.size||a.filetype||'Saved file')}</div></div><button type="button" class="mini-btn" data-remove-template-attachment="${i}">Remove</button></div>`).join('')}`;
+    box.querySelectorAll('[data-remove-template-attachment]').forEach(btn=>btn.onclick=()=>{
+      existingAttachments.splice(Number(btn.dataset.removeTemplateAttachment),1);
+      setDirty(true); renderExistingAttachments(); renderPreview();
+    });
+  }
+  function renderLibrary(){
+    const q=templateManagerSearchTerm.trim().toLowerCase();
+    const filter=templateManagerGroupFilter;
+    const items=sharedTemplates().filter(t=>(!filter || t.group===filter) && (!q || [t.subject,t.senderName,t.senderEmail,t.preview].join(' ').toLowerCase().includes(q)));
+    library.innerHTML=items.length ? items.map(t=>`<button class="template-library-item ${t.id===selectedId && mode==='edit'?'active':''}" data-tpl-manage-open="${t.id}"><div class="template-library-item-top"><span class="template-scope-badge shared">Shared</span><span class="mini-note">${esc(t.group||'Template')}</span></div><strong>${esc(t.subject||'Untitled template')}</strong><span>${esc(t.senderName||'Sender')}</span></button>`).join('') : '<div class="template-library-empty">No templates match this search.</div>';
+    library.querySelectorAll('[data-tpl-manage-open]').forEach(btn=>btn.onclick=()=>{
+      if(btn.dataset.tplManageOpen===selectedId && mode==='edit') return;
+      if(!canDiscard()) return;
+      loadTemplate(btn.dataset.tplManageOpen);
+    });
+  }
+  function fillForm(t, newMode='edit'){
+    mode=newMode;
+    selectedId=newMode==='edit' ? (t?.id||'') : '';
+    document.getElementById('tplManageModeLabel').textContent=newMode==='edit' ? 'Editing shared template' : (t ? 'New template from duplicate' : 'New shared template');
+    document.getElementById('tplManageOwnership').textContent='Shared with all staff accounts';
+    group.value=(t?.group && TEMPLATE_GROUPS.includes(t.group)) ? t.group : (lastTemplateGroup && TEMPLATE_GROUPS.includes(lastTemplateGroup) ? lastTemplateGroup : 'Everyday safe emails');
+    document.getElementById('tplManageSenderName').value=t?.senderName || '';
+    document.getElementById('tplManageSenderEmail').value=t?.senderEmail || '';
+    document.getElementById('tplManageSubject').value=t ? (newMode==='new' ? `${t.subject || 'Untitled template'} (copy)` : (t.subject||'')) : '';
+    document.getElementById('tplManagePreview').value=t?.preview || '';
+    bodyField.value=t?.body || `Hello {{student_first_name}},\n\nWrite your message here.\n\nKind regards,\n\n{{sender_name}}`;
+    document.getElementById('tplManageFolder').value=t?.defaultFolder || 'inbox';
+    linkTarget.value=t?.linkTarget || '';
+    const effectiveLabel=t?.linkLabel || fakeLinkDefaultLabel(t?.linkTarget || '');
+    linkLabel.value=effectiveLabel;
+    currentMarkerLabel=effectiveLabel;
+    document.getElementById('tplManageAttachments').value='';
+    document.getElementById('tplManageFiles').value='';
+    existingAttachments=cloneAttachments(t?.attachments||[]);
+    document.getElementById('tplManageDuplicate').classList.toggle('hidden', newMode!=='edit');
+    document.getElementById('tplManageDelete').classList.toggle('hidden', newMode!=='edit');
+    updateTypeDisplay(); renderExistingAttachments(); renderPreview(); renderLibrary();
+    setDirty(false);
+  }
+  function loadTemplate(id){
+    const t=sharedTemplates().find(x=>x.id===id);
+    if(!t){ startNew(); return; }
+    lastTemplateId=t.id; lastTemplateGroup=t.group;
+    fillForm(t,'edit');
+  }
+  function startNew(source=null){
+    fillForm(source,'new');
+    if(source) setDirty(true);
+  }
+  function insertLink(){
+    const target=linkTarget.value;
+    if(!target){ setMessage(msg,'warn','Choose a simulated link destination first.'); return; }
+    const label=linkLabel.value.trim() || fakeLinkDefaultLabel(target);
+    linkLabel.value=label;
+    const marker=`[[${label}]]`;
+    const oldMarker=currentMarkerLabel ? `[[${currentMarkerLabel}]]` : '';
+    if(oldMarker && bodyField.value.includes(oldMarker)){
+      bodyField.value=bodyField.value.replace(oldMarker,marker);
+    } else {
+      const start=bodyField.selectionStart ?? bodyField.value.length;
+      const end=bodyField.selectionEnd ?? start;
+      bodyField.value=bodyField.value.slice(0,start)+marker+bodyField.value.slice(end);
+      bodyField.focus();
+      bodyField.selectionStart=bodyField.selectionEnd=start+marker.length;
+    }
+    currentMarkerLabel=label;
+    setDirty(true); renderPreview();
+    document.getElementById('tplManageLinkHelp').textContent=`Inserted “${label}” into the email body.`;
+  }
 
-  group.onchange=updateList;
-  tpl.onchange=loadTemplate;
-
-  [
-    'tplManageType',
-    'tplManageSenderName',
-    'tplManageSenderEmail',
-    'tplManageSubject',
-    'tplManagePreview',
-    'tplManageBody',
-    'tplManageFolder',
-    'tplManageLinkTarget'
-  ].forEach(id=>{
-    const el=document.getElementById(id);
-    if(el) el.oninput=renderPreview;
-    if(el) el.onchange=renderPreview;
+  document.querySelectorAll('[data-merge-token]').forEach(btn=>btn.onclick=()=>{
+    const token=btn.dataset.mergeToken;
+    const start=bodyField.selectionStart ?? bodyField.value.length;
+    const end=bodyField.selectionEnd ?? start;
+    bodyField.value=bodyField.value.slice(0,start)+token+bodyField.value.slice(end);
+    bodyField.focus(); bodyField.selectionStart=bodyField.selectionEnd=start+token.length;
+    setDirty(true); renderPreview();
   });
 
-  updateList();
+  search.oninput=()=>{ templateManagerSearchTerm=search.value; renderLibrary(); };
+  groupFilter.onchange=()=>{ templateManagerGroupFilter=groupFilter.value; renderLibrary(); };
+  document.getElementById('tplManageNew').onclick=()=>{ if(canDiscard()) startNew(); };
+  document.getElementById('tplManageDuplicate').onclick=()=>{ const t=currentTemplate(); if(t && canDiscard()) startNew(t); };
+  document.getElementById('tplManageInsertLink').onclick=insertLink;
+  linkTarget.onchange=()=>{
+    if(!linkTarget.value){
+      if(currentMarkerLabel){ bodyField.value=bodyField.value.replace(`[[${currentMarkerLabel}]]`,''); }
+      linkLabel.value=''; currentMarkerLabel='';
+    } else if(!linkLabel.value.trim()) linkLabel.value=fakeLinkDefaultLabel(linkTarget.value);
+    setDirty(true); renderPreview();
+  };
+  linkLabel.oninput=()=>{ setDirty(true); renderPreview(); };
+  group.onchange=()=>{ updateTypeDisplay(); setDirty(true); renderPreview(); };
+  ['tplManageSenderName','tplManageSenderEmail','tplManageSubject','tplManagePreview','tplManageBody','tplManageAttachments'].forEach(id=>{
+    const el=document.getElementById(id); if(el) el.oninput=()=>{ setDirty(true); renderPreview(); };
+  });
+  document.getElementById('tplManageFolder').onchange=()=>{ setDirty(true); renderPreview(); };
+  document.getElementById('tplManageFiles').addEventListener('change',()=>{ setDirty(true); renderPreview(); });
 
-  document.getElementById('tplManageSaveChanges').onclick=async ()=>{
-    const t=state.templates.find(x=>x.id===tpl.value);
-
-    if(!t){
-      setMessage(document.getElementById('tplManageMsg'),'warn','Choose an existing template first, or use Save as new template.');
-      return;
-    }
-
-    const v=values();
-
-    if(!v.body.trim()){
-      setMessage(document.getElementById('tplManageMsg'),'warn','Enter a message body.');
-      return;
-    }
-
-    Object.assign(t,v,{
-      attachments:await collectFileAttachments('tplManageFiles','tplManageAttachments')
-    });
-
+  document.getElementById('tplManageDelete').onclick=async ()=>{
+    const t=currentTemplate(); if(!t) return;
+    const autoCount=(state.automations||[]).filter(a=>a.templateId===t.id).length;
+    const extra=autoCount ? `\n\nThis template is used by ${autoCount} automation${autoCount===1?'':'s'}. Those automations may stop working if they do not contain a saved snapshot.` : '';
+    if(!confirm(`Delete “${t.subject || 'this template'}”?${extra}\n\nThis cannot be undone.`)) return;
+    state.templates=state.templates.filter(x=>x.id!==t.id);
+    const next=sharedTemplates()[0] || null;
+    lastTemplateId=next?.id || '';
+    lastTemplateGroup=next?.group || '';
+    selectedId=lastTemplateId;
+    templateManagerUnsaved=false;
     await saveState();
-    setMessage(document.getElementById('tplManageMsg'),'ok','Template updated.');
-    updateList();
+    renderAdmin();
+    const freshMsg=document.getElementById('tplManageMsg');
+    if(freshMsg) setMessage(freshMsg,'ok','Template deleted.');
   };
 
-  document.getElementById('tplManageSaveNew').onclick=async ()=>{
-    const v=values();
-
-    if(!v.body.trim()){
-      setMessage(document.getElementById('tplManageMsg'),'warn','Enter a message body.');
-      return;
+  document.getElementById('tplManageSave').onclick=async ()=>{
+    const v=draftValues();
+    if(!v.subject){ setMessage(msg,'warn','Enter a subject for the template.'); return; }
+    if(!v.body.trim()){ setMessage(msg,'warn','Enter a message body.'); return; }
+    if(v.linkTarget){
+      const marker=`[[${v.linkLabel}]]`;
+      if(!v.body.includes(marker)){
+        setMessage(msg,'warn','The simulated link has not been inserted into the email body. Click “Insert / Update Link in Email” first.');
+        return;
+      }
     }
-
-    const newTemplate={
-      ...v,
-      id:uid('tpl'),
-      attachments:await collectFileAttachments('tplManageFiles','tplManageAttachments')
-    };
-
-    state.templates.push(newTemplate);
-
+    const newAttachments=await collectFileAttachments('tplManageFiles','tplManageAttachments');
+    const attachments=[...cloneAttachments(existingAttachments),...newAttachments];
+    let saved;
+    if(mode==='edit'){
+      saved=currentTemplate();
+      if(!saved){ setMessage(msg,'warn','This template is no longer available. Create a new template instead.'); return; }
+      Object.assign(saved,v,{attachments});
+    } else {
+      saved={...v,id:uid('tpl'),attachments};
+      state.templates.push(saved);
+    }
+    selectedId=saved.id; mode='edit'; lastTemplateId=saved.id; lastTemplateGroup=saved.group;
+    templateManagerSearchTerm='';
+    templateManagerGroupFilter=saved.group;
+    templateManagerUnsaved=false;
     await saveState();
-
-    setMessage(document.getElementById('tplManageMsg'),'ok','New custom template saved.');
-    updateList();
-    tpl.value=newTemplate.id;
-    loadTemplate();
+    renderAdmin();
+    const freshMsg=document.getElementById('tplManageMsg');
+    if(freshMsg) setMessage(freshMsg,'ok','Template saved. It is now available in the shared template library.');
   };
+
+  const back=document.getElementById('sendBackBtn');
+  if(back) back.onclick=()=>{
+    if(!canDiscard()) return;
+    templateManagerUnsaved=false; sendEmailMode='menu'; renderAdmin();
+  };
+
+  renderLibrary();
+  if(selectedId) loadTemplate(selectedId); else startNew();
 }
-
-
-
 function studentCalendarCurrentDate(){
   return getAnchorDate(studentCalendarAnchor || localDateKey(new Date()));
 }
@@ -4017,220 +4347,178 @@ document.querySelectorAll('[data-mail]').forEach(b=>b.onclick=()=>{
   renderMailbox();
 });
 }
+function isSharedTemplate(tpl){
+  if(!tpl) return false;
+  if(!tpl.ownerId) return true;
+  const owner=getUser(tpl.ownerId);
+  return !!owner && owner.role==='teacher';
+}
+function templateScopeLabel(tpl){
+  if(isSharedTemplate(tpl)) return 'Shared';
+  if(tpl?.ownerId===currentUserId) return 'My template';
+  return 'Private';
+}
 function visibleTemplatesForCurrentUser(){
-  const user = currentUser();
-
+  const user=currentUser();
   if(!user) return [];
-
-  if(user.role === 'teacher'){
-    return state.templates || [];
-  }
-
-  if(user.role === 'staff'){
-    return (state.templates || []).filter(t => t.ownerId === user.id);
-  }
-
+  const all=state.templates || [];
+  if(user.role==='teacher') return all.filter(isSharedTemplate);
+  if(user.role==='staff') return all.filter(t=>isSharedTemplate(t) || t.ownerId===user.id);
   return [];
 }
-
-function createBlankStaffTemplate(){
-  const user = currentUser();
-
-  const tpl = {
-    id: uid('tpl'),
-    ownerId: user.id,
-    group: 'Staff templates',
-    type: 'internal',
-    senderName: user.displayName,
-    senderEmail: user.email,
-    subject: 'New template',
-    preview: 'New staff template',
-    body: 'Write your template message here.',
-    defaultFolder: 'inbox',
-    linkTarget: '',
-    linkLabel: '',
-    hints: templateHintsForType('internal'),
-    attachments: []
+function createBlankStaffTemplate(source=null){
+  const user=currentUser();
+  const base=source ? clone(source) : {};
+  return {
+    ...base,
+    id:uid('tpl'),
+    ownerId:user.id,
+    group:source?.group || 'Internal staff emails',
+    type:source?.type || 'internal',
+    senderName:source?.senderName || user.displayName,
+    senderEmail:source?.senderEmail || user.email,
+    subject:source ? `${source.subject || 'Untitled template'} (copy)` : '',
+    preview:source?.preview || '',
+    body:source?.body || `Hello {{student_first_name}},\n\nWrite your message here.\n\nKind regards,\n\n{{sender_name}}`,
+    defaultFolder:source?.defaultFolder || 'inbox',
+    linkTarget:source?.linkTarget || '',
+    linkLabel:source?.linkLabel || fakeLinkDefaultLabel(source?.linkTarget || ''),
+    hints:clone(source?.hints || templateHintsForType(source?.type || 'internal')),
+    attachments:cloneAttachments(source?.attachments || [])
   };
-
-  state.templates.push(tpl);
-  selectedTemplateId = tpl.id;
-  return tpl;
 }
+function staffTemplateEditorDirty(){ return document.getElementById('readerInner')?.dataset.templateDirty==='1'; }
+function canLeaveStaffTemplateEditor(){ return !staffTemplateEditorDirty() || confirm('You have unsaved template changes. Discard them?'); }
 function renderStaffTemplateList(){
   const list=document.getElementById('mailList');
-  const items=visibleTemplatesForCurrentUser();
+  const all=visibleTemplatesForCurrentUser();
+  const q=staffTemplateSearchTerm.trim().toLowerCase();
+  const filtered=all.filter(t=>!q || [t.subject,t.senderName,t.preview,t.group].join(' ').toLowerCase().includes(q));
+  const shared=filtered.filter(isSharedTemplate);
+  const mine=filtered.filter(t=>!isSharedTemplate(t) && t.ownerId===currentUserId);
+  const draftMatches=staffTemplateDraft && (!q || [staffTemplateDraft.subject,staffTemplateDraft.senderName,staffTemplateDraft.preview,staffTemplateDraft.group].join(' ').toLowerCase().includes(q));
 
   document.getElementById('folderTitle').textContent='Templates';
-  document.getElementById('messageCount').textContent=items.length;
+  document.getElementById('messageCount').textContent=all.length;
+  if(!selectedTemplateId && all[0]) selectedTemplateId=all[0].id;
+  if(selectedTemplateId && !all.find(t=>t.id===selectedTemplateId) && staffTemplateDraft?.id!==selectedTemplateId) selectedTemplateId=all[0]?.id || '';
 
-  if(!selectedTemplateId && items[0]) selectedTemplateId=items[0].id;
-  if(!items.find(t=>t.id===selectedTemplateId)) selectedTemplateId=items[0]?.id || '';
+  const rows=(items,scope)=>items.map(t=>`<button class="mail-item ${t.id===selectedTemplateId?'active':''}" data-template="${t.id}"><div class="mail-top"><div style="min-width:0"><div class="mail-from"><span class="truncate unread">${esc(t.subject||'Untitled template')}</span></div><div class="truncate read">${esc(t.senderName||'Sender')}</div></div><span class="template-scope-badge ${scope==='Shared'?'shared':'mine'}">${scope}</span></div><div class="preview truncate">${esc(t.preview||t.group||'')}</div></button>`).join('');
 
-  list.innerHTML = `
-    <div style="padding:12px">
-      <button id="newStaffTemplateBtn" class="btn btn-primary" style="width:100%">New template</button>
+  list.innerHTML=`
+    <div class="staff-template-list-tools">
+      <button id="newStaffTemplateBtn" class="btn btn-primary" style="width:100%">+ New Template</button>
+      <input id="staffTemplateSearch" type="search" placeholder="Search templates" value="${esc(staffTemplateSearchTerm)}">
     </div>
-    ${
-      items.length
-        ? items.map(t=>`
-          <button class="mail-item ${t.id===selectedTemplateId?'active':''}" data-template="${t.id}">
-            <div class="mail-top">
-              <div style="min-width:0">
-                <div class="mail-from">
-                  <span class="truncate unread">${esc(t.senderName)}</span>
-                </div>
-                <div class="truncate read">${esc(t.subject)}</div>
-              </div>
-              <span class="time">${esc(t.group || 'Template')}</span>
-            </div>
-            <div class="preview truncate">${esc(t.preview || '')}</div>
-          </button>
-        `).join('')
-        : '<div class="panel" style="margin:16px">No templates yet. Click New template to create one.</div>'
-    }
+    ${draftMatches ? `<div class="template-list-section-title">Unsaved</div><button class="mail-item active" data-template="${staffTemplateDraft.id}"><div class="mail-top"><div class="mail-from"><span class="truncate unread">${esc(staffTemplateDraft.subject||'New template')}</span></div><span class="template-scope-badge mine">My template</span></div><div class="preview truncate">Not saved yet</div></button>` : ''}
+    <div class="template-list-section-title">Shared Templates</div>
+    ${shared.length ? rows(shared,'Shared') : '<div class="template-list-empty">No shared templates match this search.</div>'}
+    <div class="template-list-section-title">My Templates</div>
+    ${mine.length ? rows(mine,'My template') : '<div class="template-list-empty">You have not saved any personal templates yet.</div>'}
   `;
 
-  const newBtn=document.getElementById('newStaffTemplateBtn');
-  if(newBtn){
-    newBtn.onclick=async ()=>{
-      const tpl=createBlankStaffTemplate();
-      await saveState();
-      const root=document.getElementById('readerInner');
-      if(root) root.dataset.editing=tpl.id;
-      renderMailbox();
-    };
-  }
-
-  document.querySelectorAll('[data-template]').forEach(b=>{
-    b.onclick=()=>{
-      selectedTemplateId=b.dataset.template;
-      const root=document.getElementById('readerInner');
-      if(root) root.dataset.editing='';
-      renderMailbox();
-    };
+  const search=document.getElementById('staffTemplateSearch');
+  search.oninput=()=>{ staffTemplateSearchTerm=search.value; renderStaffTemplateList(); document.getElementById('staffTemplateSearch')?.focus(); };
+  document.getElementById('newStaffTemplateBtn').onclick=()=>{
+    if(!canLeaveStaffTemplateEditor()) return;
+    staffTemplateDraft=createBlankStaffTemplate();
+    selectedTemplateId=staffTemplateDraft.id;
+    const root=document.getElementById('readerInner');
+    if(root){ root.dataset.editing=staffTemplateDraft.id; root.dataset.templateDirty='0'; }
+    renderMailbox();
+  };
+  list.querySelectorAll('[data-template]').forEach(b=>b.onclick=()=>{
+    if(b.dataset.template===selectedTemplateId) return;
+    if(!canLeaveStaffTemplateEditor()) return;
+    if(staffTemplateDraft && b.dataset.template!==staffTemplateDraft.id) staffTemplateDraft=null;
+    selectedTemplateId=b.dataset.template;
+    const root=document.getElementById('readerInner');
+    if(root){ root.dataset.editing=''; root.dataset.templateDirty='0'; }
+    renderMailbox();
   });
 }
 function renderStaffTemplateReader(){
-  const root = document.getElementById('readerInner');
-  const templates = visibleTemplatesForCurrentUser();
-  const tpl = templates.find(t => t.id === selectedTemplateId) || null;
-
+  const root=document.getElementById('readerInner');
+  const templates=visibleTemplatesForCurrentUser();
+  const tpl=(staffTemplateDraft?.id===selectedTemplateId ? staffTemplateDraft : templates.find(t=>t.id===selectedTemplateId)) || null;
   if(!tpl){
-    root.innerHTML = `
-      <div class="panel">
-        <h2 style="margin-top:0">Templates</h2>
-        <p class="muted">Click New template to create your own staff template.</p>
-      </div>
-    `;
+    root.innerHTML=`<div class="panel"><h2 style="margin-top:0">Templates</h2><p class="muted">Use a shared template or create your own personal template.</p></div>`;
     return;
   }
 
-  const isEditing = root.dataset.editing === tpl.id;
+  const isDraft=staffTemplateDraft?.id===tpl.id;
+  const isMine=!isSharedTemplate(tpl) && tpl.ownerId===currentUserId;
+  const isEditing=isDraft || root.dataset.editing===tpl.id;
 
   if(!isEditing){
-    root.innerHTML = `
-      <div class="subject-line">
-        <div>
-          <h1>${esc(tpl.subject)}</h1>
-          <div class="from-box">
-            <strong>From:</strong> ${esc(tpl.senderName)} &lt;${esc(tpl.senderEmail)}&gt;
-          </div>
-        </div>
-        <div class="tag">${esc(tpl.group || 'Staff templates')}</div>
-      </div>
-
-      <div class="mail-body">${bodyHtml(tpl)}</div>
-
+    root.dataset.templateDirty='0';
+    root.innerHTML=`
+      <div class="subject-line"><div><div class="row" style="margin-bottom:8px"><span class="template-scope-badge ${isSharedTemplate(tpl)?'shared':'mine'}">${templateScopeLabel(tpl)}</span><span class="mini-note">${esc(tpl.group||'Template')}</span></div><h1>${esc(tpl.subject)}</h1><div class="from-box"><strong>From:</strong> ${esc(tpl.senderName)} &lt;${esc(tpl.senderEmail)}&gt;</div></div></div>
+      <div class="mail-body">${bodyHtml({...tpl,linkLabel:tpl.linkLabel||fakeLinkDefaultLabel(tpl.linkTarget)})}</div>
+      ${(tpl.attachments||[]).length ? `<div class="template-preview-attachments" style="margin-top:16px"><strong>Attachments</strong>${tpl.attachments.map(a=>`<span class="attachment-chip">${esc(a.filename||'Attachment')}</span>`).join('')}</div>`:''}
       <div class="row" style="margin-top:18px">
-        <button id="staffEditTemplateBtn" class="btn-secondary">Edit this template</button>
-        <button id="staffSendTemplateBtn" class="btn btn-primary">Send this template</button>
-        <button id="staffDeleteTemplateBtn" class="btn-danger">Delete template</button>
-      </div>
-    `;
+        ${isMine?'<button id="staffEditTemplateBtn" class="btn-secondary">Edit</button>':''}
+        <button id="staffSendTemplateBtn" class="btn btn-primary">Send Template</button>
+        <button id="staffDuplicateTemplateBtn" class="btn-secondary">Duplicate</button>
+        ${isMine?'<button id="staffDeleteTemplateBtn" class="btn-danger">Delete</button>':''}
+      </div>`;
 
-    document.getElementById('staffEditTemplateBtn').onclick = ()=>{
-      root.dataset.editing = tpl.id;
-      renderStaffTemplateReader();
+    const edit=document.getElementById('staffEditTemplateBtn');
+    if(edit) edit.onclick=()=>{ root.dataset.editing=tpl.id; root.dataset.templateDirty='0'; renderStaffTemplateReader(); };
+    document.getElementById('staffSendTemplateBtn').onclick=()=>{ root.dataset.editing=''; selectedTemplateId=tpl.id; openTemplateSendModal(tpl.id); };
+    document.getElementById('staffDuplicateTemplateBtn').onclick=()=>{
+      staffTemplateDraft=createBlankStaffTemplate(tpl); selectedTemplateId=staffTemplateDraft.id; root.dataset.editing=staffTemplateDraft.id; root.dataset.templateDirty='1'; renderMailbox();
     };
-
-    document.getElementById('staffSendTemplateBtn').onclick = ()=>{
-      root.dataset.editing = '';
-      selectedTemplateId = tpl.id;
-      openTemplateSendModal(tpl.id);
+    const del=document.getElementById('staffDeleteTemplateBtn');
+    if(del) del.onclick=async ()=>{
+      if(!confirm(`Delete “${tpl.subject || 'this template'}”?\n\nOnly your personal copy will be deleted.`)) return;
+      state.templates=state.templates.filter(t=>t.id!==tpl.id); selectedTemplateId=''; await saveState(); renderMailbox();
     };
-
-    document.getElementById('staffDeleteTemplateBtn').onclick = async ()=>{
-      state.templates = state.templates.filter(t => t.id !== tpl.id);
-      selectedTemplateId = '';
-      await saveState();
-      renderMailbox();
-    };
-
     return;
   }
 
-  root.innerHTML = `
-    <div class="subject-line">
-      <div style="width:100%">
-        <input id="editTemplateSubject" type="text" style="width:100%;font-size:20px;font-weight:800;padding:8px;margin-bottom:10px">
-        <div class="from-box">
-          <strong>From:</strong> ${esc(currentUser().displayName)} &lt;${esc(currentUser().email)}&gt;
-        </div>
-      </div>
-    </div>
+  root.innerHTML=`
+    <div class="staff-template-editor">
+      <div class="split"><div><span class="template-scope-badge mine">My template</span><h2 style="margin:8px 0 0">${isDraft?'New Template':'Edit Template'}</h2></div><div class="mini-note">Only you can see personal templates.</div></div>
+      <div class="field"><label>Subject</label><input id="editTemplateSubject" type="text"></div>
+      <div class="field"><label>Preview text</label><input id="editTemplatePreview" type="text"></div>
+      ${mailMergeTokensHtml()}
+      <div class="field"><label>Email body</label><textarea id="editTemplateBody" class="template-body-editor"></textarea></div>
+      <div id="staffTemplatePreview" class="template-preview-box"></div>
+      <div class="row" style="margin-top:18px"><button id="saveTemplateBtn" class="btn btn-primary">Save Template</button><button id="cancelEditTemplateBtn" class="btn-secondary">Cancel</button></div>
+      <div id="staffTemplateMsg"></div>
+    </div>`;
 
-    <div class="field" style="margin-top:12px">
-      <label>Preview text</label>
-      <input id="editTemplatePreview" type="text">
-    </div>
+  const subject=document.getElementById('editTemplateSubject');
+  const preview=document.getElementById('editTemplatePreview');
+  const body=document.getElementById('editTemplateBody');
+  subject.value=tpl.subject||''; preview.value=tpl.preview||''; body.value=tpl.body||'';
+  function staffPreview(){ document.getElementById('staffTemplatePreview').innerHTML=templatePreviewHtml({...tpl,subject:subject.value,preview:preview.value,body:body.value}); }
+  function markDirty(){ root.dataset.templateDirty='1'; staffPreview(); }
+  [subject,preview,body].forEach(el=>el.oninput=markDirty);
+  document.querySelectorAll('[data-merge-token]').forEach(btn=>btn.onclick=()=>{
+    const token=btn.dataset.mergeToken; const start=body.selectionStart ?? body.value.length; const end=body.selectionEnd ?? start;
+    body.value=body.value.slice(0,start)+token+body.value.slice(end); body.focus(); body.selectionStart=body.selectionEnd=start+token.length; markDirty();
+  });
+  staffPreview();
 
-    <textarea id="editTemplateBody" style="width:100%;height:220px;margin-top:12px;padding:10px;font-size:14px;line-height:1.5"></textarea>
-
-    <div class="row" style="margin-top:18px">
-      <button id="saveTemplateBtn" class="btn btn-primary">Save template</button>
-      <button id="cancelEditTemplateBtn" class="btn-secondary">Cancel</button>
-    </div>
-
-    <div id="staffTemplateMsg"></div>
-  `;
-
-  document.getElementById('editTemplateSubject').value = tpl.subject || '';
-  document.getElementById('editTemplatePreview').value = tpl.preview || '';
-  document.getElementById('editTemplateBody').value = tpl.body || '';
-
-  document.getElementById('saveTemplateBtn').onclick = async ()=>{
-    const subject = document.getElementById('editTemplateSubject').value.trim();
-    const preview = document.getElementById('editTemplatePreview').value.trim();
-    const body = document.getElementById('editTemplateBody').value.trim();
-    const msg = document.getElementById('staffTemplateMsg');
-
-    if(!subject || !body){
-      setMessage(msg,'warn','Enter a subject and message body.');
-      return;
+  document.getElementById('saveTemplateBtn').onclick=async ()=>{
+    const subjectValue=subject.value.trim(); const previewValue=preview.value.trim(); const bodyValue=body.value.trim();
+    if(!subjectValue || !bodyValue){ setMessage(document.getElementById('staffTemplateMsg'),'warn','Enter a subject and message body.'); return; }
+    if(isDraft){
+      tpl.subject=subjectValue; tpl.preview=previewValue||bodyValue.slice(0,90); tpl.body=bodyValue; tpl.ownerId=currentUserId;
+      state.templates.push(tpl); staffTemplateDraft=null;
+    } else {
+      tpl.subject=subjectValue; tpl.preview=previewValue||bodyValue.slice(0,90); tpl.body=bodyValue;
     }
-
-    tpl.ownerId = currentUserId;
-    tpl.group = 'Staff templates';
-    tpl.type = 'internal';
-    tpl.senderName = currentUser().displayName;
-    tpl.senderEmail = currentUser().email;
-    tpl.subject = subject;
-    tpl.preview = preview || body.slice(0,90);
-    tpl.body = body;
-    tpl.defaultFolder = tpl.defaultFolder || 'inbox';
-    tpl.hints = templateHintsForType('internal');
-
-    await saveState();
-
-    root.dataset.editing = '';
-    selectedTemplateId = tpl.id;
-    renderMailbox();
+    await saveState(); root.dataset.editing=''; root.dataset.templateDirty='0'; selectedTemplateId=tpl.id; renderMailbox();
   };
-
-  document.getElementById('cancelEditTemplateBtn').onclick = ()=>{
-    root.dataset.editing = '';
-    renderStaffTemplateReader();
+  document.getElementById('cancelEditTemplateBtn').onclick=()=>{
+    if(staffTemplateEditorDirty() && !confirm('Discard these unsaved changes?')) return;
+    if(isDraft) staffTemplateDraft=null;
+    root.dataset.editing=''; root.dataset.templateDirty='0';
+    if(isDraft) selectedTemplateId=visibleTemplatesForCurrentUser()[0]?.id || '';
+    renderMailbox();
   };
 }
 function renderMailReader(){
