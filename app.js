@@ -3931,7 +3931,6 @@ function renderTemplateManagerPageHtml(){
         ${attachmentSummaryHtml('tplManageFileSummary')}
         <div id="tplManageExistingAttachments" class="existing-attachments-box"></div>
 
-        <div id="tplManagePreviewBox" class="template-preview-box template-manager-preview"></div>
         <div class="template-save-bar">
           <div id="tplManageDirtyNote" class="mini-note"></div>
           <button id="tplManageSave" class="btn btn-primary">Save Template</button>
@@ -3939,6 +3938,17 @@ function renderTemplateManagerPageHtml(){
         <div id="tplManageMsg"></div>
       </section>
     </div>
+
+    <section class="template-manager-preview-wrap">
+      <div class="send-template-preview-heading">
+        <div>
+          <span class="send-template-preview-kicker">Learner preview</span>
+          <h4>What the learner will see</h4>
+        </div>
+        <span class="send-template-preview-note">Preview updates as you edit the template</span>
+      </div>
+      <div id="tplManagePreviewBox" class="template-preview-box template-manager-preview"></div>
+    </section>
   </div>`;
 }
 function bindTemplateManagerPage(){

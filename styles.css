@@ -1095,3 +1095,42 @@ button:disabled{
     grid-template-columns:1fr;
   }
 }
+
+
+/* ===== Teacher > Create & Manage Templates: full-width learner preview ===== */
+.template-manager-panel > .template-manager-preview-wrap{
+  display:block;
+  width:100%;
+  max-width:none;
+  margin:0;
+  border-top:2px solid #94a3b8;
+  background:#fff;
+  overflow:hidden;
+}
+.template-manager-panel > .template-manager-preview-wrap .send-template-preview-heading{
+  background:#eef4ff;
+  border-bottom:1px solid #cbd5e1;
+  padding:16px 20px;
+}
+.template-manager-panel > .template-manager-preview-wrap .template-manager-preview{
+  width:100%;
+  max-width:none;
+  min-height:260px;
+  margin:0;
+  padding:0;
+  border:0;
+  border-radius:0;
+  background:#fff;
+  white-space:normal;
+}
+.template-manager-panel > .template-manager-preview-wrap .template-preview-email{
+  width:100%;
+  max-width:none;
+  box-sizing:border-box;
+  padding:24px 28px 30px;
+}
+@media (max-width:920px){
+  .template-manager-panel > .template-manager-preview-wrap .template-preview-email{
+    padding:20px;
+  }
+}
