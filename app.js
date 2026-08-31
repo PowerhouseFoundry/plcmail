@@ -69,6 +69,10 @@ let templateManagerSearchTerm = '';
 let templateManagerGroupFilter = '';
 let staffTemplateDraft = null;
 let staffTemplateSearchTerm = '';
+let staffTemplateGroupFilter = '';
+let mailboxSelection = new Set();
+let staffMailViewFilter = 'all';
+let staffMailSort = 'newest';
 let composeSelectedTo = [];
 let composeSelectedCc = [];
 let composeRecipientMode = 'to';
@@ -624,9 +628,13 @@ async function login(username, password){
 
   try{
     await saveState();
-    // Scheduled emails are processed by the master Teacher account at sign-in.
+    // Scheduled emails are checked at sign-in. Teachers process the master queue;
+    // staff process only automations they personally created.
     if(currentUser()?.role === 'teacher'){
       const ran = processAutomations(false);
+      if(ran > 0) await saveState();
+    } else if(currentUser()?.role === 'staff'){
+      const ran = processAutomations(false,currentUserId);
       if(ran > 0) await saveState();
     }
   }catch(error){
@@ -644,6 +652,7 @@ function logout(){
   clearComposeState();
   templateManagerUnsaved=false;
   staffTemplateDraft=null;
+  clearMailboxSelection();
   currentUserId = null;
   flushDeferredRemoteState();
   document.getElementById('appShell').classList.add('hidden');
@@ -1213,7 +1222,7 @@ function updateMailboxToolbar(){
   show('deleteBtn','🗑 Delete');
   show('flagBtn', mail.flagged ? '⚑ Unflag' : '⚑ Flag');
   show('markUnreadBtn', mail.read ? '✉ Mark unread' : '✓ Mark read');
-  show('hintBtn','💡 Hint');
+  if(user?.role==='student') show('hintBtn','💡 Hint');
 
   if(mailFolder==='junk') show('spamBtn','✓ Not junk');
   else show('spamBtn','🚫 Mark as junk');
@@ -1988,7 +1997,21 @@ function folderCounts(uid){
     deleted:(box.deleted || []).length
   };
 }
-function currentMailItems(){ if(mailFolder==='calendar') return []; let items=state.mailboxes[currentUserId][mailFolder] || []; if(searchTerm.trim()){ const q=searchTerm.toLowerCase(); items=items.filter(m=>[m.senderName,m.senderEmail,m.subject,m.preview,m.body].join(' ').toLowerCase().includes(q)); } return items; }
+function currentMailItems(){
+  if(mailFolder==='calendar') return [];
+  let items=[...(state.mailboxes[currentUserId][mailFolder] || [])];
+  if(searchTerm.trim()){
+    const q=searchTerm.toLowerCase();
+    items=items.filter(m=>[m.senderName,m.senderEmail,m.subject,m.preview,m.body].join(' ').toLowerCase().includes(q));
+  }
+  if(isStaffUser()){
+    if(staffMailViewFilter==='unread') items=items.filter(m=>!m.read);
+    if(staffMailViewFilter==='flagged') items=items.filter(m=>m.flagged);
+    const stamp=m=>new Date(m.updatedAt||m.sentAt||0).getTime()||0;
+    items.sort((a,b)=>staffMailSort==='oldest' ? stamp(a)-stamp(b) : stamp(b)-stamp(a));
+  }
+  return items;
+}
 function currentMail(){ return (state.mailboxes[currentUserId][mailFolder]||[]).find(m=>m.id===selectedMailId) || null; }
 
 
@@ -2382,10 +2405,11 @@ function bindEvents(){
   if(quickComposeBtn) quickComposeBtn.onclick=()=>{
     if(isStaffUser() && mailFolder==='templates'){
       if(!canLeaveStaffTemplateEditor()) return;
-      staffTemplateDraft=createBlankStaffTemplate(); selectedTemplateId=staffTemplateDraft.id;
+      staffTemplateGroupFilter=''; staffTemplateSearchTerm=''; staffTemplateDraft=createBlankStaffTemplate(); selectedTemplateId=staffTemplateDraft.id;
       const root=document.getElementById('readerInner'); if(root){root.dataset.editing=staffTemplateDraft.id;root.dataset.templateDirty='0';}
       renderMailbox(); return;
     }
+    if(mailFolder==='calendar'){ mailFolder='inbox'; selectedMailId=null; clearMailboxSelection(); }
     beginNewCompose();
     if(isStudentMobile()){ mobileStudentTab='mail'; mobileStudentView='detail'; }
     renderMailbox();
@@ -2395,14 +2419,14 @@ function bindEvents(){
   if(avatarBtn) avatarBtn.onclick=(e)=>{ if(isStudentMobile()){e.preventDefault();e.stopPropagation();openMobileDrawer();} };
   document.getElementById('logoutBtn').onclick=logout;
   document.getElementById('topChangePw').onclick=()=>openChangePasswordModal();
-  document.getElementById('globalSearch').addEventListener('input',e=>{searchTerm=e.target.value;if(currentUser()&&currentUser().role!=='teacher')renderMailbox();});
+  document.getElementById('globalSearch').addEventListener('input',e=>{searchTerm=e.target.value;clearMailboxSelection();if(currentUser()&&currentUser().role!=='teacher')renderMailbox();});
 
   document.querySelectorAll('.folder-btn').forEach(btn=>btn.onclick=()=>{
     if(btn.dataset.folder==='templates' && currentUser()?.role==='student') return;
     if(composeMode && !closeComposeEditor()) return;
     if(isStaffUser() && mailFolder==='templates' && btn.dataset.folder!=='templates' && !canLeaveStaffTemplateEditor()) return;
     if(isStaffUser() && mailFolder==='templates' && btn.dataset.folder!=='templates') staffTemplateDraft=null;
-    mailFolder=btn.dataset.folder; selectedMailId=null; showHint=false;
+    mailFolder=btn.dataset.folder; selectedMailId=null; clearMailboxSelection(); showHint=false;
     if(isStudentMobile()){
       if(mailFolder==='calendar'){mobileStudentTab='calendar';mobileStudentView='calendar';}
       else {mobileStudentTab='mail';mobileStudentView='list';}
@@ -2421,7 +2445,13 @@ function bindEvents(){
   document.getElementById('restoreBtn').onclick=()=>restoreCurrentMail();
   document.getElementById('permanentDeleteBtn').onclick=()=>permanentlyDeleteCurrentMail();
   document.getElementById('hintBtn').onclick=()=>{showHint=!showHint;renderMailReader();};
-  document.getElementById('newMailBtn').onclick=()=>{ if(composeMode&&!closeComposeEditor())return;beginNewCompose();if(isStudentMobile())mobileStudentView='detail';renderMailReader();updateMailboxToolbar();};
+  document.getElementById('newMailBtn').onclick=()=>{
+    if(composeMode&&!closeComposeEditor())return;
+    if(isStaffUser() && mailFolder==='templates' && !canLeaveStaffTemplateEditor()) return;
+    if(isStaffUser() && mailFolder==='templates') staffTemplateDraft=null;
+    if(['templates','calendar'].includes(mailFolder)){ mailFolder='inbox'; selectedMailId=null; clearMailboxSelection(); }
+    beginNewCompose();if(isStudentMobile())mobileStudentView='detail';renderMailbox();
+  };
 
   window.addEventListener('resize',()=>{
     if(!currentUser()||currentUser().role==='teacher')return;
@@ -3101,10 +3131,10 @@ function automationIsDue(auto, force=false){
   }
   return true;
 }
-function processAutomations(force=false){
+function processAutomations(force=false, ownerId=''){
   const today=todayKey();
   let ran=0;
-  state.automations.filter(a=>a.active).forEach(auto=>{
+  state.automations.filter(a=>a.active && (!ownerId || a.createdBy===ownerId)).forEach(auto=>{
     if(!automationIsDue(auto, force)) return;
     const studentIds=(auto.studentIds||[]).filter(id=>getUser(id));
     if(!studentIds.length) return;
@@ -3115,7 +3145,9 @@ function processAutomations(force=false){
         const template = auto.templateSnapshot || state.templates.find(t=>t.id===auto.templateId);
         if(!template) return;
         studentIds.forEach(studentId=>deliverTemplateToUser(state, template, studentId, auto.folder||template.defaultFolder));
-        if((auto.attachments||[]).length){
+        // Older automations may store extra attachments separately. A snapshot already
+        // contains its attachments, so appending the same list again would duplicate them.
+        if(!auto.templateSnapshot && (auto.attachments||[]).length){
           studentIds.forEach(studentId=>{
             const latest=state.mailboxes[studentId][auto.folder||template.defaultFolder][0];
             if(latest) latest.attachments=[...cloneAttachments(latest.attachments||[]),...cloneAttachments(auto.attachments||[])];
@@ -3787,7 +3819,7 @@ function bindSendTemplatePage(){
       defaultFolder:document.getElementById('sendPageFolder').value,
       attachments:[...cloneAttachments(base.attachments||[]),...extras]
     };
-    state.automations.push({id:uid('auto'), kind:'template', name:document.getElementById('sendPageAutoName').value.trim()||'Template automation', active:true, templateId:base.id, templateSnapshot:snap, studentIds:ids, folder:snap.defaultFolder, frequency:document.getElementById('sendPageFrequency').value, quantity:Math.max(1, Number(document.getElementById('sendPageQuantity').value||1)), attachments:cloneAttachments(snap.attachments), lastRun:''});
+    state.automations.push({id:uid('auto'), kind:'template', name:document.getElementById('sendPageAutoName').value.trim()||'Template automation', active:true, templateId:base.id, templateSnapshot:snap, studentIds:ids, folder:snap.defaultFolder, frequency:document.getElementById('sendPageFrequency').value, quantity:Math.max(1, Number(document.getElementById('sendPageQuantity').value||1)), attachments:[], lastRun:'', createdBy:currentUserId});
     await saveState();
     setMessage(document.getElementById('sendPageMsg'),'ok','Automation saved.');
   };
@@ -3837,7 +3869,7 @@ function refreshStudents(){
     let ids=[]; if(!classId){ setMessage(document.getElementById('composePageMsg'),'warn','Choose a class first.'); return; }
     if(document.querySelector('input[name="composePageMode"]:checked')?.value==='selected') ids=Array.from(students.querySelectorAll('input:checked')).map(i=>i.value); else ids=classStudentIds(classId);
     if(!ids.length){ setMessage(document.getElementById('composePageMsg'),'warn','Choose at least one student.'); return; }
-    state.automations.push({id:uid('auto'), kind:'custom', name:document.getElementById('composePageAutoName').value.trim()||'Custom email automation', active:true, senderId:document.getElementById('composePageSender').value, subject, body, studentIds:ids, folder:document.getElementById('composePageFolder').value, frequency:document.getElementById('composePageFrequency').value, quantity:Math.max(1, Number(document.getElementById('composePageQuantity').value||1)), attachments:await collectFileAttachments('composePageFiles','composePageAttachments'), lastRun:''});
+    state.automations.push({id:uid('auto'), kind:'custom', name:document.getElementById('composePageAutoName').value.trim()||'Custom email automation', active:true, senderId:document.getElementById('composePageSender').value, subject, body, studentIds:ids, folder:document.getElementById('composePageFolder').value, frequency:document.getElementById('composePageFrequency').value, quantity:Math.max(1, Number(document.getElementById('composePageQuantity').value||1)), attachments:await collectFileAttachments('composePageFiles','composePageAttachments'), lastRun:'', createdBy:currentUserId});
     saveState(); setMessage(document.getElementById('composePageMsg'),'ok','Automation saved.');
   };
 }
@@ -4385,6 +4417,139 @@ function mailListPrimaryText(mail){
   if(mailFolder==='drafts') return `Draft to: ${draftRecipientLabel(mail)}`;
   return mail.senderName || 'Sender';
 }
+function clearMailboxSelection(){ mailboxSelection.clear(); }
+function selectedMailboxItems(){
+  const ids=mailboxSelection;
+  return (state.mailboxes[currentUserId]?.[mailFolder] || []).filter(m=>ids.has(m.id));
+}
+function staffBulkActionsHtml(){
+  const commonRead = !['sent','drafts','deleted'].includes(mailFolder)
+    ? '<button class="mini-btn" data-bulk-mail="read">Mark read</button><button class="mini-btn" data-bulk-mail="unread">Mark unread</button>' : '';
+  if(mailFolder==='inbox') return `<button class="mini-btn" data-bulk-mail="archive">Archive</button><button class="mini-btn" data-bulk-mail="junk">Junk</button><button class="mini-btn" data-bulk-mail="delete">Delete</button>${commonRead}<button class="mini-btn" data-bulk-mail="flag">Flag</button><button class="mini-btn" data-bulk-mail="unflag">Unflag</button>`;
+  if(mailFolder==='archive') return `<button class="mini-btn" data-bulk-mail="inbox">Move to Inbox</button><button class="mini-btn" data-bulk-mail="junk">Junk</button><button class="mini-btn" data-bulk-mail="delete">Delete</button>${commonRead}`;
+  if(mailFolder==='junk') return `<button class="mini-btn" data-bulk-mail="inbox">Not junk</button><button class="mini-btn" data-bulk-mail="delete">Delete</button>${commonRead}`;
+  if(mailFolder==='deleted') return '<button class="mini-btn" data-bulk-mail="restore">Restore</button><button class="mini-btn danger-lite" data-bulk-mail="permanent">Delete permanently</button><button class="mini-btn danger-lite" data-bulk-mail="empty-deleted">Empty Deleted Items</button>';
+  if(mailFolder==='sent') return '<button class="mini-btn" data-bulk-mail="delete">Delete</button><button class="mini-btn" data-bulk-mail="flag">Flag</button><button class="mini-btn" data-bulk-mail="unflag">Unflag</button>';
+  if(mailFolder==='drafts') return '<button class="mini-btn" data-bulk-mail="delete">Delete drafts</button>';
+  return '';
+}
+function staffMailboxControlsHtml(items){
+  const selectable=!['calendar','templates'].includes(mailFolder);
+  if(!isStaffUser() || !selectable) return '';
+  const visibleIds=new Set(items.map(m=>m.id));
+  [...mailboxSelection].forEach(id=>{ if(!visibleIds.has(id)) mailboxSelection.delete(id); });
+  const selectedCount=mailboxSelection.size;
+  const allSelected=items.length>0 && items.every(m=>mailboxSelection.has(m.id));
+  return `<div class="staff-mail-controls">
+    <div class="staff-mail-control-row">
+      <label class="mail-select-all"><input id="staffSelectAllMail" type="checkbox" ${allSelected?'checked':''} ${items.length?'':'disabled'}><span>Select all</span></label>
+      <select id="staffMailFilter" aria-label="Filter messages">
+        <option value="all" ${staffMailViewFilter==='all'?'selected':''}>All mail</option>
+        <option value="unread" ${staffMailViewFilter==='unread'?'selected':''}>Unread</option>
+        <option value="flagged" ${staffMailViewFilter==='flagged'?'selected':''}>Flagged</option>
+      </select>
+      <select id="staffMailSort" aria-label="Sort messages">
+        <option value="newest" ${staffMailSort==='newest'?'selected':''}>Newest</option>
+        <option value="oldest" ${staffMailSort==='oldest'?'selected':''}>Oldest</option>
+      </select>
+    </div>
+    <div id="staffBulkBar" class="staff-bulk-bar ${selectedCount?'':'is-idle'}">
+      <strong id="staffSelectedCount">${selectedCount ? `${selectedCount} selected` : 'Select messages for bulk actions'}</strong>
+      <div class="staff-bulk-buttons">${staffBulkActionsHtml()}</div>
+      ${selectedCount?'<button id="staffClearSelection" class="mini-btn">Clear</button>':''}
+    </div>
+  </div>`;
+}
+async function bulkMoveSelectedMail(targetFolder){
+  const source=state.mailboxes[currentUserId]?.[mailFolder] || [];
+  const selected=new Set(mailboxSelection);
+  const moving=source.filter(m=>selected.has(m.id));
+  if(!moving.length) return;
+  state.mailboxes[currentUserId][mailFolder]=source.filter(m=>!selected.has(m.id));
+  state.mailboxes[currentUserId][targetFolder]=state.mailboxes[currentUserId][targetFolder] || [];
+  moving.forEach(m=>m.folder=targetFolder);
+  state.mailboxes[currentUserId][targetFolder].unshift(...moving);
+  if(selected.has(selectedMailId)) selectedMailId=null;
+  clearMailboxSelection();
+  await saveState();
+  renderMailbox();
+}
+async function bulkSetMailRead(read){
+  const items=selectedMailboxItems();
+  if(!items.length) return;
+  items.forEach(m=>m.read=read);
+  clearMailboxSelection(); await saveState(); renderMailbox();
+}
+async function bulkSetMailFlag(flag=true){
+  const items=selectedMailboxItems();
+  if(!items.length) return;
+  items.forEach(m=>m.flagged=flag);
+  clearMailboxSelection(); await saveState(); renderMailbox();
+}
+async function bulkPermanentDeleteMail(){
+  if(mailFolder!=='deleted' || !mailboxSelection.size) return;
+  if(!confirm(`Permanently delete ${mailboxSelection.size} selected email${mailboxSelection.size===1?'':'s'}? This cannot be undone.`)) return;
+  const ids=new Set(mailboxSelection);
+  state.mailboxes[currentUserId].deleted=(state.mailboxes[currentUserId].deleted||[]).filter(m=>!ids.has(m.id));
+  if(ids.has(selectedMailId)) selectedMailId=null;
+  clearMailboxSelection(); await saveState(); renderMailbox();
+}
+async function emptyDeletedItems(){
+  if(mailFolder!=='deleted') return;
+  const count=(state.mailboxes[currentUserId].deleted||[]).length;
+  if(!count) return;
+  if(!confirm(`Permanently delete all ${count} email${count===1?'':'s'} in Deleted Items? This cannot be undone.`)) return;
+  state.mailboxes[currentUserId].deleted=[]; selectedMailId=null; clearMailboxSelection(); await saveState(); renderMailbox();
+}
+function syncStaffMailSelectionUi(items){
+  const checks=Array.from(document.querySelectorAll('[data-mail-check]'));
+  checks.forEach(ch=>{ ch.checked=mailboxSelection.has(ch.dataset.mailCheck); ch.closest('.mail-select-row')?.classList.toggle('selected',ch.checked); });
+  const all=document.getElementById('staffSelectAllMail');
+  if(all){ all.checked=items.length>0 && items.every(m=>mailboxSelection.has(m.id)); all.indeterminate=mailboxSelection.size>0 && !all.checked; }
+  const count=document.getElementById('staffSelectedCount');
+  if(count) count.textContent=mailboxSelection.size ? `${mailboxSelection.size} selected` : 'Select messages for bulk actions';
+  const bar=document.getElementById('staffBulkBar');
+  if(bar) bar.classList.toggle('is-idle',!mailboxSelection.size);
+  document.querySelectorAll('[data-bulk-mail]').forEach(btn=>{
+    if(btn.dataset.bulkMail==='empty-deleted') btn.disabled=false;
+    else btn.disabled=!mailboxSelection.size;
+  });
+  const clear=document.getElementById('staffClearSelection');
+  if(clear) clear.style.display=mailboxSelection.size?'':'none';
+}
+function bindStaffMailboxControls(list, items){
+  if(!isStaffUser()) return;
+  const all=document.getElementById('staffSelectAllMail');
+  if(all) all.onchange=()=>{
+    if(all.checked) items.forEach(m=>mailboxSelection.add(m.id)); else items.forEach(m=>mailboxSelection.delete(m.id));
+    syncStaffMailSelectionUi(items);
+  };
+  const filter=document.getElementById('staffMailFilter');
+  if(filter) filter.onchange=()=>{ staffMailViewFilter=filter.value; clearMailboxSelection(); selectedMailId=null; renderMailbox(); };
+  const sort=document.getElementById('staffMailSort');
+  if(sort) sort.onchange=()=>{ staffMailSort=sort.value; renderMailList(); };
+  list.querySelectorAll('[data-mail-check]').forEach(ch=>ch.onchange=(e)=>{
+    e.stopPropagation();
+    if(ch.checked) mailboxSelection.add(ch.dataset.mailCheck); else mailboxSelection.delete(ch.dataset.mailCheck);
+    syncStaffMailSelectionUi(items);
+  });
+  const clear=document.getElementById('staffClearSelection');
+  if(clear) clear.onclick=()=>{ clearMailboxSelection(); syncStaffMailSelectionUi(items); };
+  document.querySelectorAll('[data-bulk-mail]').forEach(btn=>btn.onclick=async()=>{
+    const action=btn.dataset.bulkMail;
+    if(action==='archive') return bulkMoveSelectedMail('archive');
+    if(action==='inbox' || action==='restore') return bulkMoveSelectedMail('inbox');
+    if(action==='junk') return bulkMoveSelectedMail('junk');
+    if(action==='delete') return bulkMoveSelectedMail('deleted');
+    if(action==='read') return bulkSetMailRead(true);
+    if(action==='unread') return bulkSetMailRead(false);
+    if(action==='flag') return bulkSetMailFlag(true);
+    if(action==='unflag') return bulkSetMailFlag(false);
+    if(action==='permanent') return bulkPermanentDeleteMail();
+    if(action==='empty-deleted') return emptyDeletedItems();
+  });
+  syncStaffMailSelectionUi(items);
+}
 function renderMailList(){
   document.querySelectorAll('.folder-btn').forEach(btn=>btn.classList.toggle('active',btn.dataset.folder===mailFolder));
   const titles={inbox:'Inbox',archive:'Archive',sent:'Sent Items',drafts:'Drafts',junk:'Junk Email',deleted:'Deleted Items',templates:'Templates',calendar:'Calendar'};
@@ -4404,8 +4569,16 @@ function renderMailList(){
   document.getElementById('messageCount').textContent=items.length;
   if(!selectedMailId&&items[0])selectedMailId=items[0].id;
   if(!items.find(i=>i.id===selectedMailId))selectedMailId=items[0]?.id||null;
-  list.innerHTML=items.length?items.map(m=>`<button class="mail-item ${m.id===selectedMailId?'active':''}" data-mail="${m.id}"><div class="mail-item-row"><div class="mail-list-avatar">${esc(mailAvatarText(m))}</div><div class="mail-item-content"><div class="mail-top"><div style="min-width:0"><div class="mail-from">${m.read?'':'<span class="dot"></span>'}<span class="truncate ${m.read?'read':'unread'}">${esc(mailListPrimaryText(m))}</span>${m.flagged?'<span style="color:#f59e0b">⚑</span>':''}${m.reported?'<span title="Reported suspicious">⚠</span>':''}</div><div class="truncate ${m.read?'read':'unread'}">${esc(m.subject)}</div></div><span class="time">${esc(m.timeLabel||formatMailDate(m.updatedAt||m.sentAt))}</span></div><div class="preview truncate">${esc(m.preview||'')}</div></div></div></button>`).join(''):'<div class="panel" style="margin:16px">No messages in this folder.</div>';
 
+  const controls=staffMailboxControlsHtml(items);
+  const rows=items.length ? items.map(m=>{
+    const content=`<div class="mail-item-row"><div class="mail-list-avatar">${esc(mailAvatarText(m))}</div><div class="mail-item-content"><div class="mail-top"><div style="min-width:0"><div class="mail-from">${m.read?'':'<span class="dot"></span>'}<span class="truncate ${m.read?'read':'unread'}">${esc(mailListPrimaryText(m))}</span>${m.flagged?'<span style="color:#f59e0b">⚑</span>':''}${m.reported?'<span title="Reported suspicious">⚠</span>':''}</div><div class="truncate ${m.read?'read':'unread'}">${esc(m.subject)}</div></div><span class="time">${esc(m.timeLabel||formatMailDate(m.updatedAt||m.sentAt))}</span></div><div class="preview truncate">${esc(m.preview||'')}</div></div></div>`;
+    if(isStaffUser()) return `<div class="mail-select-row ${m.id===selectedMailId?'active':''} ${mailboxSelection.has(m.id)?'selected':''}"><label class="mail-row-checkbox" title="Select message"><input type="checkbox" data-mail-check="${m.id}" ${mailboxSelection.has(m.id)?'checked':''}></label><button class="mail-item mail-item-main ${m.id===selectedMailId?'active':''}" data-mail="${m.id}">${content}</button></div>`;
+    return `<button class="mail-item ${m.id===selectedMailId?'active':''}" data-mail="${m.id}">${content}</button>`;
+  }).join('') : '<div class="panel" style="margin:16px">No messages in this folder.</div>';
+  list.innerHTML=controls+rows;
+
+  bindStaffMailboxControls(list,items);
   list.querySelectorAll('[data-mail]').forEach(b=>b.onclick=()=>{
     if(composeMode&&!closeComposeEditor())return;
     selectedMailId=b.dataset.mail;
@@ -4459,14 +4632,79 @@ function createBlankStaffTemplate(source=null){
 }
 function staffTemplateEditorDirty(){ return document.getElementById('readerInner')?.dataset.templateDirty==='1'; }
 function canLeaveStaffTemplateEditor(){ return !staffTemplateEditorDirty() || confirm('You have unsaved template changes. Discard them?'); }
+function staffOwnedAutomations(templateId=''){
+  return (state.automations||[]).filter(a=>a.createdBy===currentUserId && (!templateId || a.templateId===templateId));
+}
+function openStaffAutomationManager(templateId=''){
+  const autos=staffOwnedAutomations(templateId);
+  const template=templateId ? visibleTemplatesForCurrentUser().find(t=>t.id===templateId) : null;
+  openModal(`<div class="stack">
+    <div class="split"><div><h2 style="margin:0">My Automations</h2><div class="muted">Only automations created from your staff account are shown here. They are checked when you sign in.</div></div><button id="staffAutoClose" class="btn-secondary">Close</button></div>
+    ${template?`<div class="soft-panel"><strong>Template:</strong> ${esc(template.subject||'Untitled template')}</div>`:''}
+    <div class="row"><button id="staffAutoNew" class="btn btn-primary">+ New Automation</button><button id="staffAutoRun" class="btn-secondary" ${autos.length?'':'disabled'}>Run my automations now</button></div>
+    <div class="staff-automation-list">${autos.length?autos.map(a=>{
+      const tpl=visibleTemplatesForCurrentUser().find(t=>t.id===a.templateId) || state.templates.find(t=>t.id===a.templateId);
+      return `<div class="staff-automation-card"><div><div class="row"><strong>${esc(a.name||'Automation')}</strong>${a.active?'<span class="tag safe">Active</span>':'<span class="tag spam">Paused</span>'}</div><div class="mini-note">${esc(tpl?.subject||'Template')} • ${esc(a.frequency||'Daily')} • ${(a.studentIds||[]).length} learner${(a.studentIds||[]).length===1?'':'s'} • ${esc(folderLabel(a.folder||tpl?.defaultFolder||'inbox'))}</div></div><div class="row"><button class="mini-btn" data-staff-auto-edit="${a.id}">Edit</button><button class="mini-btn" data-staff-auto-toggle="${a.id}">${a.active?'Pause':'Resume'}</button><button class="mini-btn danger-lite" data-staff-auto-delete="${a.id}">Delete</button></div></div>`;
+    }).join(''):'<div class="soft-panel muted">No personal automations yet.</div>'}</div>
+    <div id="staffAutoManagerMsg"></div>
+  </div>`,'compact');
+  document.getElementById('staffAutoClose').onclick=closeModal;
+  document.getElementById('staffAutoNew').onclick=()=>openStaffAutomationEditor(templateId);
+  const run=document.getElementById('staffAutoRun');
+  if(run) run.onclick=async()=>{ const ran=processAutomations(true,currentUserId); await saveState(); setMessage(document.getElementById('staffAutoManagerMsg'),'ok',ran?`${ran} automation${ran===1?'':'s'} run successfully.`:'No active automations to run.'); };
+  document.querySelectorAll('[data-staff-auto-edit]').forEach(b=>b.onclick=()=>openStaffAutomationEditor('',b.dataset.staffAutoEdit));
+  document.querySelectorAll('[data-staff-auto-toggle]').forEach(b=>b.onclick=async()=>{ const a=state.automations.find(x=>x.id===b.dataset.staffAutoToggle && x.createdBy===currentUserId); if(!a)return; a.active=!a.active; await saveState(); openStaffAutomationManager(templateId); });
+  document.querySelectorAll('[data-staff-auto-delete]').forEach(b=>b.onclick=async()=>{ const a=state.automations.find(x=>x.id===b.dataset.staffAutoDelete && x.createdBy===currentUserId); if(!a)return; if(!confirm(`Delete automation “${a.name||'Automation'}”?`))return; state.automations=state.automations.filter(x=>x.id!==a.id); await saveState(); openStaffAutomationManager(templateId); });
+}
+function openStaffAutomationEditor(initialTemplateId='', editId=''){
+  const existing=editId ? state.automations.find(a=>a.id===editId && a.createdBy===currentUserId) : null;
+  const templates=visibleTemplatesForCurrentUser();
+  const templateId=existing?.templateId || initialTemplateId || templates[0]?.id || '';
+  if(!templates.length){ openModal('<h2>Automation</h2><div class="message warn">Create or choose a template first.</div><div class="row"><button id="staffAutoNoTplClose" class="btn-secondary">Close</button></div>','narrow'); document.getElementById('staffAutoNoTplClose').onclick=closeModal; return; }
+  const existingIds=new Set(existing?.studentIds||[]);
+  let initialClass='';
+  if(existingIds.size){ initialClass=getUser([...existingIds][0])?.classId || ''; }
+  openModal(`<div class="stack"><div class="split"><div><h2 style="margin:0">${existing?'Edit Automation':'New Automation'}</h2><div class="muted">This automation belongs only to your staff account.</div></div></div>
+    <div class="grid2"><div>
+      <div class="field"><label>Automation name</label><input id="staffAutoName" type="text" value="${esc(existing?.name||'')}"></div>
+      <div class="field"><label>Template</label><select id="staffAutoTemplate">${templates.map(t=>`<option value="${t.id}" ${(t.id===templateId)?'selected':''}>${esc(templateScopeLabel(t))} — ${esc(t.subject||'Untitled template')}</option>`).join('')}</select></div>
+      <div class="field"><label>Frequency</label><select id="staffAutoFrequency"><option ${existing?.frequency==='Daily'?'selected':''}>Daily</option><option ${existing?.frequency==='Weekdays'?'selected':''}>Weekdays</option><option ${existing?.frequency==='Weekly'?'selected':''}>Weekly</option></select></div>
+      <div class="field"><label>Quantity each run</label><input id="staffAutoQuantity" type="number" min="1" value="${Math.max(1,Number(existing?.quantity||1))}"></div>
+      <div class="field"><label>Destination folder</label><select id="staffAutoFolder"><option value="inbox" ${existing?.folder==='inbox'?'selected':''}>Inbox</option><option value="junk" ${existing?.folder==='junk'?'selected':''}>Junk Email</option><option value="deleted" ${existing?.folder==='deleted'?'selected':''}>Deleted Items</option></select></div>
+      <label class="selector-item"><input id="staffAutoActive" type="checkbox" ${existing?.active===false?'':'checked'}><div><div>Automation active</div><small>Pause it at any time from My Automations.</small></div></label>
+    </div><div>
+      <div class="field"><label>Choose class</label><select id="staffAutoClass"><option value="">Choose a class</option>${state.classes.map(c=>`<option value="${c.id}" ${c.id===initialClass?'selected':''}>${esc(c.name)}</option>`).join('')}</select></div>
+      <div class="field"><label>Who should receive it?</label><div class="row"><label class="selector-item" style="flex:1"><input type="radio" name="staffAutoMode" value="class"><div><div>Whole class</div><small>All learners in the class.</small></div></label><label class="selector-item" style="flex:1"><input type="radio" name="staffAutoMode" value="selected" checked><div><div>Selected learners</div><small>Choose individual learners.</small></div></label></div></div>
+      <div id="staffAutoStudentsWrap" class="field"><label>Select learners</label><div id="staffAutoStudents" class="selector-list"></div></div>
+      <div class="soft-panel mini-note">Automations run when your staff account signs in. “Run my automations now” is available for testing.</div>
+    </div></div>
+    <div class="row"><button id="staffAutoSave" class="btn btn-primary">${existing?'Save changes':'Save Automation'}</button><button id="staffAutoCancel" class="btn-secondary">Cancel</button></div><div id="staffAutoMsg"></div></div>`,'compact');
+  const cls=document.getElementById('staffAutoClass'); const wrap=document.getElementById('staffAutoStudentsWrap'); const list=document.getElementById('staffAutoStudents');
+  function rebuild(){ const ids=cls.value?classStudentIds(cls.value):[]; list.innerHTML=ids.length?ids.map(id=>{ const u=getUser(id); return `<label class="student-check-row"><input type="checkbox" value="${id}" ${existingIds.has(id)?'checked':''}><span class="student-check-name">${esc(u.displayName)}</span><span class="student-check-class">${esc(u.email)}</span></label>`; }).join(''):'<div class="muted">Choose a class first.</div>'; }
+  function syncMode(){ const mode=document.querySelector('input[name="staffAutoMode"]:checked')?.value||'selected'; wrap.classList.toggle('hidden',mode!=='selected'); }
+  cls.onchange=rebuild; document.querySelectorAll('input[name="staffAutoMode"]').forEach(r=>r.onchange=syncMode); rebuild(); syncMode();
+  document.getElementById('staffAutoCancel').onclick=()=>openStaffAutomationManager(initialTemplateId || existing?.templateId || '');
+  document.getElementById('staffAutoSave').onclick=async()=>{
+    if(!cls.value){ setMessage(document.getElementById('staffAutoMsg'),'warn','Choose a class first.'); return; }
+    const mode=document.querySelector('input[name="staffAutoMode"]:checked')?.value||'selected';
+    const ids=mode==='class' ? classStudentIds(cls.value) : Array.from(list.querySelectorAll('input:checked')).map(i=>i.value);
+    if(!ids.length){ setMessage(document.getElementById('staffAutoMsg'),'warn','Choose at least one learner.'); return; }
+    const tpl=templates.find(t=>t.id===document.getElementById('staffAutoTemplate').value);
+    if(!tpl){ setMessage(document.getElementById('staffAutoMsg'),'warn','Choose a template.'); return; }
+    const target=existing || {id:uid('auto'),kind:'template',createdBy:currentUserId,lastRun:''};
+    target.kind='template'; target.createdBy=currentUserId; target.name=document.getElementById('staffAutoName').value.trim()||`${tpl.subject||'Template'} automation`; target.templateId=tpl.id; target.templateSnapshot=clone(tpl); target.studentIds=ids; target.folder=document.getElementById('staffAutoFolder').value||tpl.defaultFolder||'inbox'; target.frequency=document.getElementById('staffAutoFrequency').value; target.quantity=Math.max(1,Number(document.getElementById('staffAutoQuantity').value||1)); target.active=document.getElementById('staffAutoActive').checked; target.attachments=[];
+    if(!existing) state.automations.push(target);
+    await saveState(); openStaffAutomationManager(initialTemplateId || tpl.id);
+  };
+}
 function renderStaffTemplateList(){
   const list=document.getElementById('mailList');
   const all=visibleTemplatesForCurrentUser();
   const q=staffTemplateSearchTerm.trim().toLowerCase();
-  const filtered=all.filter(t=>!q || [t.subject,t.senderName,t.preview,t.group].join(' ').toLowerCase().includes(q));
+  const filtered=all.filter(t=>(!staffTemplateGroupFilter || t.group===staffTemplateGroupFilter) && (!q || [t.subject,t.senderName,t.preview,t.group].join(' ').toLowerCase().includes(q)));
   const shared=filtered.filter(isSharedTemplate);
   const mine=filtered.filter(t=>!isSharedTemplate(t) && t.ownerId===currentUserId);
-  const draftMatches=staffTemplateDraft && (!q || [staffTemplateDraft.subject,staffTemplateDraft.senderName,staffTemplateDraft.preview,staffTemplateDraft.group].join(' ').toLowerCase().includes(q));
+  const draftMatches=staffTemplateDraft && (!staffTemplateGroupFilter || staffTemplateDraft.group===staffTemplateGroupFilter) && (!q || [staffTemplateDraft.subject,staffTemplateDraft.senderName,staffTemplateDraft.preview,staffTemplateDraft.group].join(' ').toLowerCase().includes(q));
 
   document.getElementById('folderTitle').textContent='Templates';
   document.getElementById('messageCount').textContent=all.length;
@@ -4477,24 +4715,26 @@ function renderStaffTemplateList(){
 
   list.innerHTML=`
     <div class="staff-template-list-tools">
-      <button id="newStaffTemplateBtn" class="btn btn-primary" style="width:100%">+ New Template</button>
+      <div class="staff-template-tool-buttons"><button id="newStaffTemplateBtn" class="btn btn-primary">+ New Template</button><button id="staffAutomationsBtn" class="btn-secondary">⚙ My Automations <span class="mini-count">${staffOwnedAutomations().length}</span></button></div>
       <input id="staffTemplateSearch" type="search" placeholder="Search templates" value="${esc(staffTemplateSearchTerm)}">
+      <select id="staffTemplateGroupFilter"><option value="">All template groups</option>${TEMPLATE_GROUPS.map(g=>`<option value="${esc(g)}" ${staffTemplateGroupFilter===g?'selected':''}>${esc(g)}</option>`).join('')}</select>
     </div>
     ${draftMatches ? `<div class="template-list-section-title">Unsaved</div><button class="mail-item active" data-template="${staffTemplateDraft.id}"><div class="mail-top"><div class="mail-from"><span class="truncate unread">${esc(staffTemplateDraft.subject||'New template')}</span></div><span class="template-scope-badge mine">My template</span></div><div class="preview truncate">Not saved yet</div></button>` : ''}
     <div class="template-list-section-title">Shared Templates</div>
-    ${shared.length ? rows(shared,'Shared') : '<div class="template-list-empty">No shared templates match this search.</div>'}
+    ${shared.length ? rows(shared,'Shared') : '<div class="template-list-empty">No shared templates match this view.</div>'}
     <div class="template-list-section-title">My Templates</div>
     ${mine.length ? rows(mine,'My template') : '<div class="template-list-empty">You have not saved any personal templates yet.</div>'}
   `;
 
   const search=document.getElementById('staffTemplateSearch');
   search.oninput=()=>{ staffTemplateSearchTerm=search.value; renderStaffTemplateList(); document.getElementById('staffTemplateSearch')?.focus(); };
+  document.getElementById('staffTemplateGroupFilter').onchange=e=>{ staffTemplateGroupFilter=e.target.value; renderStaffTemplateList(); };
+  document.getElementById('staffAutomationsBtn').onclick=()=>openStaffAutomationManager();
   document.getElementById('newStaffTemplateBtn').onclick=()=>{
     if(!canLeaveStaffTemplateEditor()) return;
-    staffTemplateDraft=createBlankStaffTemplate();
-    selectedTemplateId=staffTemplateDraft.id;
-    const root=document.getElementById('readerInner');
-    if(root){ root.dataset.editing=staffTemplateDraft.id; root.dataset.templateDirty='0'; }
+    staffTemplateGroupFilter=''; staffTemplateSearchTerm='';
+    staffTemplateDraft=createBlankStaffTemplate(); selectedTemplateId=staffTemplateDraft.id;
+    const root=document.getElementById('readerInner'); if(root){ root.dataset.editing=staffTemplateDraft.id; root.dataset.templateDirty='0'; }
     renderMailbox();
   };
   list.querySelectorAll('[data-template]').forEach(b=>b.onclick=()=>{
@@ -4502,8 +4742,7 @@ function renderStaffTemplateList(){
     if(!canLeaveStaffTemplateEditor()) return;
     if(staffTemplateDraft && b.dataset.template!==staffTemplateDraft.id) staffTemplateDraft=null;
     selectedTemplateId=b.dataset.template;
-    const root=document.getElementById('readerInner');
-    if(root){ root.dataset.editing=''; root.dataset.templateDirty='0'; }
+    const root=document.getElementById('readerInner'); if(root){ root.dataset.editing=''; root.dataset.templateDirty='0'; }
     renderMailbox();
   });
 }
@@ -4511,85 +4750,62 @@ function renderStaffTemplateReader(){
   const root=document.getElementById('readerInner');
   const templates=visibleTemplatesForCurrentUser();
   const tpl=(staffTemplateDraft?.id===selectedTemplateId ? staffTemplateDraft : templates.find(t=>t.id===selectedTemplateId)) || null;
-  if(!tpl){
-    root.innerHTML=`<div class="panel"><h2 style="margin-top:0">Templates</h2><p class="muted">Use a shared template or create your own personal template.</p></div>`;
-    return;
-  }
+  if(!tpl){ root.innerHTML=`<div class="panel"><h2 style="margin-top:0">Templates</h2><p class="muted">Use a shared template or create your own personal template.</p></div>`; return; }
 
   const isDraft=staffTemplateDraft?.id===tpl.id;
   const isMine=!isSharedTemplate(tpl) && tpl.ownerId===currentUserId;
   const isEditing=isDraft || root.dataset.editing===tpl.id;
+  const previewStudent=state.users.find(u=>u.role==='student'&&u.active)||null;
 
   if(!isEditing){
     root.dataset.templateDirty='0';
-    root.innerHTML=`
-      <div class="subject-line"><div><div class="row" style="margin-bottom:8px"><span class="template-scope-badge ${isSharedTemplate(tpl)?'shared':'mine'}">${templateScopeLabel(tpl)}</span><span class="mini-note">${esc(tpl.group||'Template')}</span></div><h1>${esc(tpl.subject)}</h1><div class="from-box"><strong>From:</strong> ${esc(tpl.senderName)} &lt;${esc(tpl.senderEmail)}&gt;</div></div></div>
-      <div class="mail-body">${bodyHtml({...tpl,linkLabel:tpl.linkLabel||fakeLinkDefaultLabel(tpl.linkTarget)})}</div>
-      ${(tpl.attachments||[]).length ? `<div class="template-preview-attachments" style="margin-top:16px"><strong>Attachments</strong>${tpl.attachments.map(a=>`<span class="attachment-chip">${esc(a.filename||'Attachment')}</span>`).join('')}</div>`:''}
-      <div class="row" style="margin-top:18px">
-        ${isMine?'<button id="staffEditTemplateBtn" class="btn-secondary">Edit</button>':''}
-        <button id="staffSendTemplateBtn" class="btn btn-primary">Send Template</button>
-        <button id="staffDuplicateTemplateBtn" class="btn-secondary">Duplicate</button>
-        ${isMine?'<button id="staffDeleteTemplateBtn" class="btn-danger">Delete</button>':''}
-      </div>`;
-
-    const edit=document.getElementById('staffEditTemplateBtn');
-    if(edit) edit.onclick=()=>{ root.dataset.editing=tpl.id; root.dataset.templateDirty='0'; renderStaffTemplateReader(); };
+    root.innerHTML=`<div class="staff-template-view">
+      <div class="split staff-template-view-head"><div><div class="row" style="margin-bottom:8px"><span class="template-scope-badge ${isSharedTemplate(tpl)?'shared':'mine'}">${templateScopeLabel(tpl)}</span><span class="mini-note">${esc(tpl.group||'Template')}</span><span class="mini-note">Default: ${esc(folderLabel(tpl.defaultFolder||'inbox'))}</span></div><h1>${esc(tpl.subject||'(No subject)')}</h1><div class="from-box"><strong>From:</strong> ${esc(tpl.senderName)} &lt;${esc(tpl.senderEmail)}&gt;</div></div><div class="row">${isMine?'<button id="staffEditTemplateBtn" class="btn-secondary">Edit</button>':''}<button id="staffSendTemplateBtn" class="btn btn-primary">Send Template</button><button id="staffDuplicateTemplateBtn" class="btn-secondary">Duplicate</button><button id="staffTemplateAutoBtn" class="btn-secondary">⚙ Automations</button>${isMine?'<button id="staffDeleteTemplateBtn" class="btn-danger">Delete</button>':''}</div></div>
+      <section class="staff-template-preview-wrap"><div class="send-template-preview-heading"><div><span class="send-template-preview-kicker">Learner preview</span><h4>What the learner will see</h4></div><span class="send-template-preview-note">Preview uses a sample learner for mail merge</span></div><div class="template-preview-box staff-template-full-preview">${templatePreviewHtml(tpl,previewStudent)}</div></section>
+    </div>`;
+    const edit=document.getElementById('staffEditTemplateBtn'); if(edit) edit.onclick=()=>{ root.dataset.editing=tpl.id; root.dataset.templateDirty='0'; renderStaffTemplateReader(); };
     document.getElementById('staffSendTemplateBtn').onclick=()=>{ root.dataset.editing=''; selectedTemplateId=tpl.id; openTemplateSendModal(tpl.id); };
-    document.getElementById('staffDuplicateTemplateBtn').onclick=()=>{
-      staffTemplateDraft=createBlankStaffTemplate(tpl); selectedTemplateId=staffTemplateDraft.id; root.dataset.editing=staffTemplateDraft.id; root.dataset.templateDirty='1'; renderMailbox();
-    };
+    document.getElementById('staffDuplicateTemplateBtn').onclick=()=>{ staffTemplateDraft=createBlankStaffTemplate(tpl); selectedTemplateId=staffTemplateDraft.id; root.dataset.editing=staffTemplateDraft.id; root.dataset.templateDirty='1'; renderMailbox(); };
+    document.getElementById('staffTemplateAutoBtn').onclick=()=>openStaffAutomationManager(tpl.id);
     const del=document.getElementById('staffDeleteTemplateBtn');
-    if(del) del.onclick=async ()=>{
-      if(!confirm(`Delete “${tpl.subject || 'this template'}”?\n\nOnly your personal copy will be deleted.`)) return;
-      state.templates=state.templates.filter(t=>t.id!==tpl.id); selectedTemplateId=''; await saveState(); renderMailbox();
-    };
+    if(del) del.onclick=async()=>{ const autoCount=staffOwnedAutomations(tpl.id).length; const extra=autoCount?`\n\nThis will also remove ${autoCount} personal automation${autoCount===1?'':'s'} linked to it.`:''; if(!confirm(`Delete “${tpl.subject||'this template'}”?${extra}`))return; state.templates=state.templates.filter(t=>t.id!==tpl.id); state.automations=(state.automations||[]).filter(a=>!(a.createdBy===currentUserId&&a.templateId===tpl.id)); selectedTemplateId=''; await saveState(); renderMailbox(); };
     return;
   }
 
-  root.innerHTML=`
-    <div class="staff-template-editor">
-      <div class="split"><div><span class="template-scope-badge mine">My template</span><h2 style="margin:8px 0 0">${isDraft?'New Template':'Edit Template'}</h2></div><div class="mini-note">Only you can see personal templates.</div></div>
-      <div class="field"><label>Subject</label><input id="editTemplateSubject" type="text"></div>
-      <div class="field"><label>Preview text</label><input id="editTemplatePreview" type="text"></div>
-      ${mailMergeTokensHtml()}
-      <div class="field"><label>Email body</label><textarea id="editTemplateBody" class="template-body-editor"></textarea></div>
-      <div id="staffTemplatePreview" class="template-preview-box"></div>
-      <div class="row" style="margin-top:18px"><button id="saveTemplateBtn" class="btn btn-primary">Save Template</button><button id="cancelEditTemplateBtn" class="btn-secondary">Cancel</button></div>
-      <div id="staffTemplateMsg"></div>
-    </div>`;
-
-  const subject=document.getElementById('editTemplateSubject');
-  const preview=document.getElementById('editTemplatePreview');
-  const body=document.getElementById('editTemplateBody');
-  subject.value=tpl.subject||''; preview.value=tpl.preview||''; body.value=tpl.body||'';
-  function staffPreview(){ document.getElementById('staffTemplatePreview').innerHTML=templatePreviewHtml({...tpl,subject:subject.value,preview:preview.value,body:body.value}); }
-  function markDirty(){ root.dataset.templateDirty='1'; staffPreview(); }
-  [subject,preview,body].forEach(el=>el.oninput=markDirty);
-  document.querySelectorAll('[data-merge-token]').forEach(btn=>btn.onclick=()=>{
-    const token=btn.dataset.mergeToken; const start=body.selectionStart ?? body.value.length; const end=body.selectionEnd ?? start;
-    body.value=body.value.slice(0,start)+token+body.value.slice(end); body.focus(); body.selectionStart=body.selectionEnd=start+token.length; markDirty();
-  });
-  staffPreview();
-
-  document.getElementById('saveTemplateBtn').onclick=async ()=>{
-    const subjectValue=subject.value.trim(); const previewValue=preview.value.trim(); const bodyValue=body.value.trim();
-    if(!subjectValue || !bodyValue){ setMessage(document.getElementById('staffTemplateMsg'),'warn','Enter a subject and message body.'); return; }
-    if(isDraft){
-      tpl.subject=subjectValue; tpl.preview=previewValue||bodyValue.slice(0,90); tpl.body=bodyValue; tpl.ownerId=currentUserId;
-      state.templates.push(tpl); staffTemplateDraft=null;
-    } else {
-      tpl.subject=subjectValue; tpl.preview=previewValue||bodyValue.slice(0,90); tpl.body=bodyValue;
-    }
-    await saveState(); root.dataset.editing=''; root.dataset.templateDirty='0'; selectedTemplateId=tpl.id; renderMailbox();
-  };
-  document.getElementById('cancelEditTemplateBtn').onclick=()=>{
-    if(staffTemplateEditorDirty() && !confirm('Discard these unsaved changes?')) return;
-    if(isDraft) staffTemplateDraft=null;
-    root.dataset.editing=''; root.dataset.templateDirty='0';
-    if(isDraft) selectedTemplateId=visibleTemplatesForCurrentUser()[0]?.id || '';
-    if(!flushDeferredRemoteState()) renderMailbox();
-  };
+  let existingAttachments=cloneAttachments(tpl.attachments||[]);
+  let currentMarkerLabel=tpl.linkLabel||fakeLinkDefaultLabel(tpl.linkTarget||'');
+  const fakeOptions=Object.keys(fakePages).map(k=>`<option value="${k}">${esc(fakePages[k].title)}</option>`).join('');
+  root.innerHTML=`<div class="staff-template-editor full-access">
+    <div class="split staff-template-editor-head"><div><span class="template-scope-badge mine">My template</span><h2 style="margin:8px 0 0">${isDraft?'New Template':'Edit Template'}</h2><div class="muted">Personal template — only your staff account can see or edit it.</div></div><button id="staffEditAutomationsBtn" class="btn-secondary">⚙ My Automations</button></div>
+    <div class="grid2 template-editor-fields"><div class="field"><label>Template group</label><select id="staffTplGroup">${TEMPLATE_GROUPS.map(g=>`<option value="${esc(g)}" ${tpl.group===g?'selected':''}>${esc(g)}</option>`).join('')}</select></div><div class="field"><label>Email type</label><div id="staffTplTypeLabel" class="template-type-display"></div></div><div class="field"><label>Sender name</label><input id="staffTplSenderName" type="text" value="${esc(tpl.senderName||currentUser()?.displayName||'')}"></div><div class="field"><label>Sender email</label><input id="staffTplSenderEmail" type="text" value="${esc(tpl.senderEmail||currentUser()?.email||'')}"></div></div>
+    <div class="field"><label>Subject</label><input id="staffTplSubject" type="text" value="${esc(tpl.subject||'')}"></div>
+    <div class="field"><label>Preview text</label><input id="staffTplPreviewText" type="text" value="${esc(tpl.preview||'')}"></div>
+    ${mailMergeTokensHtml()}
+    <div class="field"><label>Email body</label><textarea id="staffTplBody" class="template-body-editor">${esc(tpl.body||'')}</textarea></div>
+    <div class="simulated-link-panel"><div class="split"><div><strong>Simulated training link</strong><div class="muted">Optional. Choose a training page, enter the words the learner will see, then insert the link into the email.</div></div><span class="tag phishing">Training only</span></div><div class="grid2" style="margin-top:12px"><div class="field"><label>Link destination</label><select id="staffTplLinkTarget"><option value="">No simulated link</option>${fakeOptions}</select></div><div class="field"><label>Link text</label><input id="staffTplLinkLabel" type="text" value="${esc(currentMarkerLabel)}" placeholder="e.g. Rebook my delivery"></div></div><button id="staffTplInsertLink" class="btn-secondary" type="button">Insert / Update Link in Email</button><div id="staffTplLinkHelp" class="mini-note" style="margin-top:8px">The link will appear in the body and learner preview.</div></div>
+    <div class="grid2" style="margin-top:14px"><div class="field"><label>Destination folder</label><select id="staffTplFolder"><option value="inbox" ${tpl.defaultFolder==='inbox'?'selected':''}>Inbox</option><option value="junk" ${tpl.defaultFolder==='junk'?'selected':''}>Junk Email</option><option value="deleted" ${tpl.defaultFolder==='deleted'?'selected':''}>Deleted Items</option></select></div><div class="field"><label>Simulated attachment filenames</label><input id="staffTplAttachments" type="text" placeholder="e.g. invoice.pdf, form.docx"></div></div>
+    <div class="field"><label>Attach real files</label><input id="staffTplFiles" type="file" multiple></div>${attachmentSummaryHtml('staffTplFileSummary')}<div id="staffTplExistingAttachments" class="existing-attachments-box"></div>
+    <div class="template-save-bar staff-template-save-bar"><div id="staffTplDirtyNote" class="mini-note">All changes saved</div><div class="row"><button id="saveTemplateBtn" class="btn btn-primary">Save Template</button><button id="cancelEditTemplateBtn" class="btn-secondary">Cancel</button></div></div><div id="staffTemplateMsg"></div>
+    <section class="staff-template-preview-wrap editor-preview"><div class="send-template-preview-heading"><div><span class="send-template-preview-kicker">Learner preview</span><h4>What the learner will see</h4></div><span class="send-template-preview-note">Preview updates as you edit</span></div><div id="staffTemplatePreview" class="template-preview-box staff-template-full-preview"></div></section>
+  </div>`;
+  bindAttachmentPicker('staffTplFiles','staffTplFileSummary');
+  const group=document.getElementById('staffTplGroup'), subject=document.getElementById('staffTplSubject'), preview=document.getElementById('staffTplPreviewText'), body=document.getElementById('staffTplBody'), linkTarget=document.getElementById('staffTplLinkTarget'), linkLabel=document.getElementById('staffTplLinkLabel'), msg=document.getElementById('staffTemplateMsg');
+  linkTarget.value=tpl.linkTarget||'';
+  function typeLabel(type){ return type==='phishing'?'Phishing / scam':type==='spam'?'Spam / junk':type==='internal'?'Internal':'Safe'; }
+  function updateType(){ const type=templateTypeForGroup(group.value); document.getElementById('staffTplTypeLabel').innerHTML=`<span class="tag ${type}">${esc(typeLabel(type))}</span><span class="mini-note">Set automatically from the group</span>`; }
+  function extraNames(){ return [...String(document.getElementById('staffTplAttachments').value||'').split(',').map(x=>x.trim()).filter(Boolean),...Array.from(document.getElementById('staffTplFiles').files||[]).map(f=>f.name)]; }
+  function values(){ return {group:group.value,type:templateTypeForGroup(group.value),senderName:document.getElementById('staffTplSenderName').value.trim()||'Sender',senderEmail:document.getElementById('staffTplSenderEmail').value.trim()||'sender@plcmail.com',subject:subject.value.trim(),preview:preview.value.trim(),body:body.value,defaultFolder:document.getElementById('staffTplFolder').value,linkTarget:linkTarget.value,linkLabel:linkTarget.value?(linkLabel.value.trim()||fakeLinkDefaultLabel(linkTarget.value)):'',hints:templateHintsForType(templateTypeForGroup(group.value)),ownerId:currentUserId}; }
+  function renderPreview(){ document.getElementById('staffTemplatePreview').innerHTML=templatePreviewHtml({...values(),attachments:existingAttachments},previewStudent,extraNames()); }
+  function markDirty(){ root.dataset.templateDirty='1'; document.getElementById('staffTplDirtyNote').textContent='Unsaved changes'; renderPreview(); }
+  function renderExisting(){ const box=document.getElementById('staffTplExistingAttachments'); box.innerHTML=existingAttachments.length?`<div class="existing-attachments-title">Saved attachments</div>${existingAttachments.map((a,i)=>`<div class="existing-attachment-row"><div><strong>${esc(a.filename||'Attachment')}</strong><div class="mini-note">${esc(a.size||a.filetype||'Saved file')}</div></div><button type="button" class="mini-btn" data-remove-staff-tpl-att="${i}">Remove</button></div>`).join('')}`:'<div class="muted">No saved attachments on this template.</div>'; box.querySelectorAll('[data-remove-staff-tpl-att]').forEach(b=>b.onclick=()=>{ existingAttachments.splice(Number(b.dataset.removeStaffTplAtt),1); renderExisting(); markDirty(); }); }
+  document.querySelectorAll('[data-merge-token]').forEach(btn=>btn.onclick=()=>{ const token=btn.dataset.mergeToken,start=body.selectionStart??body.value.length,end=body.selectionEnd??start; body.value=body.value.slice(0,start)+token+body.value.slice(end); body.focus(); body.selectionStart=body.selectionEnd=start+token.length; markDirty(); });
+  document.getElementById('staffTplInsertLink').onclick=()=>{ if(!linkTarget.value){setMessage(msg,'warn','Choose a simulated link destination first.');return;} const label=linkLabel.value.trim()||fakeLinkDefaultLabel(linkTarget.value); linkLabel.value=label; const marker=`[[${label}]]`,old=currentMarkerLabel?`[[${currentMarkerLabel}]]`:''; if(old&&body.value.includes(old))body.value=body.value.replace(old,marker);else{const start=body.selectionStart??body.value.length,end=body.selectionEnd??start;body.value=body.value.slice(0,start)+marker+body.value.slice(end);body.focus();body.selectionStart=body.selectionEnd=start+marker.length;} currentMarkerLabel=label; document.getElementById('staffTplLinkHelp').textContent=`Inserted “${label}” into the email body.`; markDirty(); };
+  linkTarget.onchange=()=>{ if(!linkTarget.value){if(currentMarkerLabel)body.value=body.value.replace(`[[${currentMarkerLabel}]]`,'');linkLabel.value='';currentMarkerLabel='';}else if(!linkLabel.value.trim())linkLabel.value=fakeLinkDefaultLabel(linkTarget.value); markDirty(); };
+  ['staffTplSenderName','staffTplSenderEmail','staffTplSubject','staffTplPreviewText','staffTplBody','staffTplAttachments'].forEach(id=>document.getElementById(id).oninput=markDirty); group.onchange=()=>{updateType();markDirty();}; linkLabel.oninput=markDirty; document.getElementById('staffTplFolder').onchange=markDirty; document.getElementById('staffTplFiles').addEventListener('change',markDirty);
+  document.getElementById('staffEditAutomationsBtn').onclick=()=>{ if(staffTemplateEditorDirty()){setMessage(msg,'warn','Save the template before managing its automations.');return;} openStaffAutomationManager(tpl.id); };
+  document.getElementById('saveTemplateBtn').onclick=async()=>{ const v=values(); if(!v.subject){setMessage(msg,'warn','Enter a subject for the template.');return;} if(!v.body.trim()){setMessage(msg,'warn','Enter a message body.');return;} if(v.linkTarget&&!v.body.includes(`[[${v.linkLabel}]]`)){setMessage(msg,'warn','Insert the simulated link into the email body before saving.');return;} let newAttachments=[]; try{newAttachments=await collectFileAttachments('staffTplFiles','staffTplAttachments');}catch(error){console.error('Template attachment upload failed:',error);setMessage(msg,'warn','One or more attachments could not be uploaded. Try again.');return;} Object.assign(tpl,v,{attachments:[...cloneAttachments(existingAttachments),...newAttachments]}); if(isDraft){state.templates.push(tpl);staffTemplateDraft=null;} staffTemplateSearchTerm=''; staffTemplateGroupFilter=tpl.group; await saveState(); root.dataset.editing='';root.dataset.templateDirty='0';selectedTemplateId=tpl.id;renderMailbox(); };
+  document.getElementById('cancelEditTemplateBtn').onclick=()=>{ if(staffTemplateEditorDirty()&&!confirm('Discard these unsaved changes?'))return;if(isDraft)staffTemplateDraft=null;root.dataset.editing='';root.dataset.templateDirty='0';if(isDraft)selectedTemplateId=visibleTemplatesForCurrentUser()[0]?.id||'';if(!flushDeferredRemoteState())renderMailbox(); };
+  updateType(); renderExisting(); renderPreview(); root.dataset.templateDirty='0';
 }
 function renderMailReader(){
   const root=document.getElementById('readerInner');
