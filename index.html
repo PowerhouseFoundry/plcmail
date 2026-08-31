@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <title>PLC Mail</title>
-    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="styles.css?v=20260831-1022" />
 </head>
 <body>
 <div id="loginOverlay" class="overlay">
@@ -140,7 +140,7 @@
   }, 8000);
 </script>
 <script type="module">
-  import('./app.js').catch(error => {
+  import('./app.js?v=20260831-1022').catch(error => {
     console.error('PLC Mail module failed to load:', error);
     window.__plcMailStarted = true;
     const status = document.getElementById('loginStatus');

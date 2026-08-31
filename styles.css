@@ -1045,3 +1045,53 @@ button:disabled{
   .send-template-preview-note{text-align:left}
   .send-page-preview .template-preview-email{padding:20px}
 }
+
+
+/* ===== Teacher > Send Email > Send From Library: final layout ===== */
+.send-template-panel{
+  display:block;
+}
+.send-template-form-grid{
+  display:grid;
+  grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+  gap:24px;
+  align-items:start;
+}
+.send-template-form-grid > .stack{
+  align-self:start;
+  min-width:0;
+}
+.send-template-form-grid .field{
+  align-self:start;
+}
+.send-template-panel > .send-template-preview-wrap{
+  display:block;
+  width:100%;
+  max-width:none;
+  margin:24px 0 0;
+  clear:both;
+  border:2px solid #94a3b8;
+  border-radius:20px;
+  background:#fff;
+  overflow:hidden;
+  box-shadow:0 8px 24px rgba(15,23,42,.08);
+}
+.send-template-panel > .send-template-preview-wrap .send-template-preview-heading{
+  background:#eef4ff;
+  border-bottom:1px solid #cbd5e1;
+}
+.send-template-panel > .send-template-preview-wrap .send-page-preview{
+  width:100%;
+  max-width:none;
+  min-height:260px;
+}
+.send-template-panel > .send-template-preview-wrap .template-preview-email{
+  width:100%;
+  max-width:none;
+  box-sizing:border-box;
+}
+@media (max-width:920px){
+  .send-template-form-grid{
+    grid-template-columns:1fr;
+  }
+}
