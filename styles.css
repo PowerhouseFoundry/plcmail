@@ -941,3 +941,44 @@
   .template-save-bar{margin:18px -16px -16px;padding:12px 16px}
   .template-manager-heading,.template-editor-topline{align-items:stretch;flex-direction:column}
 }
+
+/* PLC Mail reliability and realism patch */
+.login-status{
+  margin-top:12px;
+  padding:9px 11px;
+  border-radius:12px;
+  background:#f1f5f9;
+  color:#64748b;
+  font-size:13px;
+  font-weight:700;
+}
+.login-status.ok{
+  background:#ecfdf5;
+  color:#047857;
+}
+.login-status.error{
+  background:#fff7ed;
+  color:#c2410c;
+}
+button:disabled{
+  cursor:not-allowed;
+  opacity:.55;
+}
+.mail-reader{
+  grid-template-rows:auto 1fr;
+}
+.tool-danger{
+  color:#b91c1c;
+  border-color:#fecaca;
+  background:#fff7f7;
+}
+.compose-saved-attachment + .compose-saved-attachment{
+  border-top:1px solid var(--line);
+  margin-top:8px;
+  padding-top:8px;
+}
+@media (min-width:921px){
+  .toolbar{
+    min-height:70px;
+  }
+}

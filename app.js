@@ -14,6 +14,7 @@ const STORAGE_KEY = 'plcmail_local_v3';
 
 const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
 const TEMPLATE_GROUPS = ['Everyday safe emails','Internal staff emails','Spam / junk','Phishing / scam'];
+const MAILBOX_FOLDERS = ['inbox','archive','junk','deleted','sent','drafts'];
 const fakePages = {
   'fake-bank': { title:'Lloyds Secure Verification', fields:['Full name','Card number','Sort code','Online banking password'] },
   'fake-delivery': { title:'Royal Mail Redelivery', fields:['Full name','Address','Bank card number','Expiry date'] },
@@ -71,20 +72,40 @@ let staffTemplateSearchTerm = '';
 let composeSelectedTo = [];
 let composeSelectedCc = [];
 let composeRecipientMode = 'to';
+let composeBaseAttachments = [];
+let composePendingFiles = [];
+let composeEditingDraftId = '';
+let composeDirty = false;
+let deferredRemoteState = null;
+let loginReady = false;
 
 function uid(prefix){ return prefix + '_' + Math.random().toString(36).slice(2,10); }
 function esc(t){ return String(t ?? '').replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#039;'); }
 function initials(name){ return String(name||'').split(' ').map(x=>x[0]).join('').slice(0,2).toUpperCase(); }
 function mailAvatarText(mail){
-  if(mailFolder === 'sent'){
+  if(mailFolder === 'sent' || mailFolder === 'drafts'){
     const recipient = getUser(mail.recipientId);
     return initials(recipient?.displayName || mail.recipientName || 'PL');
   }
 
   return initials(mail.senderName || 'PL');
 }
-function shortTime(){ return new Date().toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}); }
-function timestamp(){ return new Date().toLocaleString(); }
+function shortTime(){ return new Date().toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'}); }
+function timestamp(){ return new Date().toISOString(); }
+function formatDateTime(value){
+  if(!value) return '';
+  const d = new Date(value);
+  if(Number.isNaN(d.getTime())) return String(value);
+  return d.toLocaleString('en-GB', {day:'2-digit', month:'2-digit', year:'numeric', hour:'2-digit', minute:'2-digit'});
+}
+function formatMailDate(value){
+  if(!value) return '';
+  const d = new Date(value);
+  if(Number.isNaN(d.getTime())) return String(value);
+  const now = new Date();
+  if(d.toDateString() === now.toDateString()) return d.toLocaleTimeString('en-GB', {hour:'2-digit', minute:'2-digit'});
+  return d.toLocaleDateString('en-GB', {day:'2-digit', month:'short', year:'numeric'});
+}
 function todayKey(){ const d=new Date(); return d.toISOString().slice(0,10); }
 function weekdayNum(){ const d = new Date().getDay(); return d === 0 ? 7 : d; }
 function openModal(html, mode='default'){ const card=document.getElementById('modalCard'); card.className='card' + (mode==='narrow'?' narrow':mode==='compact'?' compact':''); card.innerHTML=html; document.getElementById('modalOverlay').classList.remove('hidden'); }
@@ -103,7 +124,7 @@ function isTeacherUser(){
   const user = currentUser();
   return user && user.role === 'teacher';
 }
-function className(id){ return state.classes.find(c=>c.id===id)?.name || ''; }
+function className(id, sourceState=state){ return sourceState?.classes?.find(c=>c.id===id)?.name || ''; }
 function cloneValue(value){
   if(typeof value === 'undefined') return undefined;
   return clone(value);
@@ -270,6 +291,7 @@ function saveState(){
 
     const stateChangedWhileSaving = !valuesEqual(state, localSnapshot);
     stateBase = clone(committedState);
+    deferredRemoteState = null;
 
     if(stateChangedWhileSaving){
       // Re-apply any local changes made while the transaction was in flight onto the
@@ -282,6 +304,7 @@ function saveState(){
     return committedState;
   }).finally(() => {
     pendingSaveCount = Math.max(0, pendingSaveCount - 1);
+    if(pendingSaveCount === 0 && !hasOpenEditor()) flushDeferredRemoteState();
   });
 
   saveQueue = task.catch((error) => {
@@ -305,8 +328,8 @@ function loginEmailKey(login){
 function userEmailKey(user){
   return normaliseAccountEmail(user.email || fullEmail(user.username || ''));
 }
-function parseAttachments(text){ return String(text||'').split(',').map(s=>s.trim()).filter(Boolean).map(name=>({id:uid('att'), filename:name, filetype:(name.split('.').pop()||'FILE').toUpperCase(), size:'Local file'})); }
-function folderLabel(folder){ return folder==='junk'?'Junk Email':folder==='deleted'?'Deleted Items':folder==='sent'?'Sent Items':'Inbox'; }
+function parseAttachments(text){ return String(text||'').split(',').map(s=>s.trim()).filter(Boolean).map(name=>({id:uid('att'), filename:name, filetype:(name.split('.').pop()||'FILE').toUpperCase(), size:'Training attachment', simulated:true})); }
+function folderLabel(folder){ const labels={inbox:'Inbox',archive:'Archive',junk:'Junk Email',deleted:'Deleted Items',sent:'Sent Items',drafts:'Drafts',calendar:'Calendar',templates:'Templates'}; return labels[folder] || 'Inbox'; }
 function userLabel(userId){ const u=getUser(userId); return u ? (u.displayName + ' (' + u.email + ')') : ''; }
 function monitorableMailboxUsers(){ return state.users.filter(u=>u.active && (u.role==='teacher' || u.role==='staff')); }
 function monitoredMailbox(){ return getUser(monitoredMailboxUserId); }
@@ -345,41 +368,74 @@ function seedDemoMail(s, teacher, staff, students){
 }
 
 function ensureStateShape(){
-  state.templates = state.templates || buildTemplates();
-  state.classes = state.classes || [];
-  state.users = state.users || [];
-  state.logins = state.logins || [];
-  state.automations = state.automations || [];
+  state.templates = Array.isArray(state.templates) ? state.templates : buildTemplates();
+  state.classes = Array.isArray(state.classes) ? state.classes : [];
+  state.users = Array.isArray(state.users) ? state.users : [];
+  state.logins = Array.isArray(state.logins) ? state.logins : [];
+  state.automations = Array.isArray(state.automations) ? state.automations : [];
   state.mailboxes = state.mailboxes || {};
   state.events = state.events || {};
-  state.logins.forEach(l=>{
-  if(!l.email){
-    l.email = fullEmail(l.username || '');
-  }
-});
+  state.activityLog = Array.isArray(state.activityLog) ? state.activityLog : [];
+  state.settings = state.settings || {allowStudentToStudent:false};
   state.meta = state.meta || {};
-    state.users.forEach(u=>{
-    const existingLogin = state.logins.find(l => l.userId === u.id);
 
-    if(!existingLogin){
-      state.logins.push({
+  state.users.forEach(u=>{
+    if(typeof u.active === 'undefined') u.active = true;
+    u.email = u.email || fullEmail(u.username || '');
+
+    let login = state.logins.find(l => l.userId === u.id);
+    if(!login){
+      login = {
         id: uid('login'),
         userId: u.id,
         role: u.role || 'student',
         username: u.username || '',
+        email: u.email,
         password: u.password || (u.role === 'teacher' ? 'admin123' : u.role === 'staff' ? 'support123' : 'student123'),
         active: u.active !== false,
         displayName: u.displayName || '',
         classId: u.classId || ''
-      });
+      };
+      state.logins.push(login);
+    } else {
+      // Keep the visible account record and the login record in step. This also repairs
+      // passwords changed in older PLC Mail builds where only the user record was updated.
+      login.role = u.role || login.role || 'student';
+      login.username = u.username || login.username || '';
+      login.email = u.email || fullEmail(login.username || '');
+      login.password = u.password || login.password || '';
+      login.active = u.active !== false;
+      login.displayName = u.displayName || login.displayName || '';
+      login.classId = u.classId || '';
     }
+
+    if(!state.mailboxes[u.id]) state.mailboxes[u.id]={inbox:[],archive:[],junk:[],deleted:[],sent:[],drafts:[]};
+    MAILBOX_FOLDERS.forEach(folder=>{
+      if(!Array.isArray(state.mailboxes[u.id][folder])) state.mailboxes[u.id][folder]=[];
+    });
+
+    MAILBOX_FOLDERS.forEach(folder=>{
+      (state.mailboxes[u.id][folder] || []).forEach(mail=>{
+        if(typeof mail.read === 'undefined') mail.read = folder==='sent' || folder==='drafts';
+        if(typeof mail.flagged === 'undefined') mail.flagged = false;
+        if(typeof mail.reported === 'undefined') mail.reported = false;
+        mail.folder = folder;
+        mail.attachments = Array.isArray(mail.attachments) ? mail.attachments : [];
+        mail.replies = Array.isArray(mail.replies) ? mail.replies : [];
+        if(folder==='sent' && mail.recipientId){
+          const recipient=state.users.find(x=>x.id===mail.recipientId);
+          mail.recipientName = mail.recipientName || recipient?.displayName || '';
+          mail.recipientEmail = mail.recipientEmail || recipient?.email || '';
+        }
+      });
+    });
+
+    if(!Array.isArray(state.events[u.id])) state.events[u.id]=[];
+    state.events[u.id] = state.events[u.id].map(normaliseCalendarEvent).filter(Boolean);
   });
-  state.users.forEach(u=>{
-    if(!state.mailboxes[u.id]) state.mailboxes[u.id]={inbox:[],junk:[],deleted:[],sent:[],drafts:[]};
-    ['inbox','junk','deleted','sent'].forEach(f=>{ if(!Array.isArray(state.mailboxes[u.id][f])) state.mailboxes[u.id][f]=[]; });
-    if(!state.events[u.id]) state.events[u.id]=[];
-    if(typeof u.active === 'undefined') u.active = true;
-    
+
+  state.logins.forEach(l=>{
+    if(!l.email) l.email = fullEmail(l.username || '');
   });
 }
 function cleanDuplicateAccounts(){
@@ -404,10 +460,10 @@ function cleanDuplicateAccounts(){
       // Merge mailbox contents into the keeper account before removing duplicate.
       if(state.mailboxes?.[user.id]){
         if(!state.mailboxes[keeper.id]){
-          state.mailboxes[keeper.id] = { inbox:[], junk:[], deleted:[], sent:[], drafts:[] };
+          state.mailboxes[keeper.id] = { inbox:[], archive:[], junk:[], deleted:[], sent:[], drafts:[] };
         }
 
-        ['inbox', 'junk', 'deleted', 'sent'].forEach(folder => {
+        MAILBOX_FOLDERS.forEach(folder => {
           state.mailboxes[keeper.id][folder] = [
             ...(state.mailboxes[keeper.id][folder] || []),
             ...(state.mailboxes[user.id][folder] || [])
@@ -436,12 +492,12 @@ function cleanDuplicateAccounts(){
     const email = loginEmailKey(login);
 
     if(!validUserIds.has(login.userId)){
-      console.warn('Removed orphan login with no matching user:', login);
+      console.warn('Removed orphan login record:', login.userId || '', login.email || login.username || '');
       return false;
     }
 
     if(seenLoginEmails.has(email)){
-      console.warn('Removed duplicate login for email:', email, login);
+      console.warn('Removed duplicate login record for email:', email);
       return false;
     }
 
@@ -469,7 +525,28 @@ async function loadInitialStateFromFirestore(){
   stateBase = clone(state);
   return state;
 }
-
+function hasOpenEditor(){
+  if(composeMode) return true;
+  if(templateManagerUnsaved || staffTemplateEditorDirty()) return true;
+  if(isTeacherUser() && sendEmailMode !== 'menu') return true;
+  return false;
+}
+function applyRemoteState(remote){
+  state = clone(remote);
+  stateBase = clone(remote);
+  ensureStateShape();
+}
+function flushDeferredRemoteState(){
+  if(!deferredRemoteState || pendingSaveCount > 0 || hasOpenEditor()) return false;
+  const remote = deferredRemoteState;
+  deferredRemoteState = null;
+  applyRemoteState(remote);
+  if(currentUserId){
+    if(isTeacherUser() || isStaffUser()) renderApp();
+    else renderMailbox();
+  }
+  return true;
+}
 function startFirestoreSync(){
   if(startedFirestoreSync) return;
   startedFirestoreSync = true;
@@ -477,65 +554,48 @@ function startFirestoreSync(){
   onSnapshot(PLCMAIL_DOC, (snapshot)=>{
     if(!snapshot.exists()) return;
 
-    // Do not let a server snapshot overwrite local changes while a transaction is queued
-    // or in flight. The transaction reads the newest server copy and merges it safely.
     if(pendingSaveCount > 0) return;
 
-    const active = document.activeElement;
-    const isTyping =
-      active &&
-      (
-        active.tagName === 'INPUT' ||
-        active.tagName === 'TEXTAREA' ||
-        active.tagName === 'SELECT' ||
-        active.isContentEditable
-      );
-
-    if(composeMode && isTyping){
-      captureComposeDraft();
+    if(hasOpenEditor()){
+      deferredRemoteState = clone(snapshot.data());
       return;
     }
 
-    state = snapshot.data();
-    stateBase = clone(state);
-    ensureStateShape();
+    applyRemoteState(snapshot.data());
 
     if(currentUserId){
-      if(isTeacherUser() || isStaffUser()){
-        renderApp();
-      } else {
-        renderMailbox();
-      }
+      if(isTeacherUser() || isStaffUser()) renderApp();
+      else renderMailbox();
     }
   }, (error)=>{
-    console.error("Failed to start Firestore sync:", error);
+    console.error('Failed to start Firestore sync:', error);
   });
 }
 
-function resetDemo(){ state=createInitialState(); saveState(); }
 async function login(username, password){
   const msg = document.getElementById('loginMsg');
 
-  if(!state){
-    setMessage(msg, 'warn', 'The app is still loading. Please try again.');
+  if(!state || !loginReady){
+    setMessage(msg, 'warn', 'PLC Mail is still connecting. Please try again in a moment.');
     return;
   }
 
-  const safeUsername = String(username || '').trim().toLowerCase();
+  const entered = String(username || '').trim().toLowerCase();
   const safePassword = String(password || '').trim();
 
-  if(!safeUsername || !safePassword){
-    setMessage(msg, 'warn', 'Enter your username and password.');
+  if(!entered || !safePassword){
+    setMessage(msg, 'warn', 'Enter your username or email address and password.');
     return;
   }
 
-const loginRecord = (state.logins || []).find(item => {
-  const itemEmail = String(item.email || fullEmail(item.username || '')).trim().toLowerCase();
-  return item.active !== false && itemEmail === safeUsername;
-});
+  const enteredEmail = normaliseAccountEmail(entered.includes('@') ? entered : fullEmail(entered));
+  const loginRecord = (state.logins || []).find(item => {
+    const itemUsername = String(item.username || '').trim().toLowerCase();
+    return item.active !== false && (loginEmailKey(item) === enteredEmail || itemUsername === entered);
+  });
 
   if(!loginRecord){
-    setMessage(msg, 'warn', 'We could not find that email.');
+    setMessage(msg, 'warn', 'We could not find that account.');
     return;
   }
 
@@ -545,66 +605,81 @@ const loginRecord = (state.logins || []).find(item => {
   }
 
   currentUserId = loginRecord.userId;
-
   const existingIndex = state.users.findIndex(u => u.id === loginRecord.userId);
-  const mergedUser = {
-    id: loginRecord.userId,
-    role: loginRecord.role || 'student',
-    displayName: loginRecord.displayName || loginRecord.username,
-    username: loginRecord.username || '',
-    email: fullEmail(loginRecord.username || ''),
-    password: loginRecord.password || '',
-    classId: loginRecord.classId || '',
-    active: loginRecord.active !== false,
-    lastLogin: new Date().toLocaleString()
-  };
 
-if(existingIndex >= 0){
-  state.users[existingIndex] = {
-    ...state.users[existingIndex],
-    lastLogin: new Date().toLocaleString()
-  };
-} else {
-  state.logins = (state.logins || []).filter(l => l.userId !== loginRecord.userId);
-  await saveState();
-
-  setMessage(
-    msg,
-    'warn',
-    'This login is linked to an old deleted account. Ask staff to create the student account again.'
-  );
-
-  return;
-}
-
-  if(!state.mailboxes[currentUserId]){
-    state.mailboxes[currentUserId] = { inbox:[], junk:[], deleted:[], sent:[], drafts:[] };
+  if(existingIndex < 0){
+    state.logins = (state.logins || []).filter(l => l.userId !== loginRecord.userId);
+    await saveState();
+    currentUserId = null;
+    setMessage(msg, 'warn', 'This login is linked to an old deleted account. Ask staff to create the account again.');
+    return;
   }
-  if(!state.events[currentUserId]){
-    state.events[currentUserId] = [];
+
+  const now = timestamp();
+  state.users[existingIndex] = {...state.users[existingIndex], lastLogin: now};
+  loginRecord.lastLogin = now;
+
+  if(!state.mailboxes[currentUserId]) state.mailboxes[currentUserId] = {inbox:[],archive:[],junk:[],deleted:[],sent:[],drafts:[]};
+  if(!state.events[currentUserId]) state.events[currentUserId] = [];
+
+  try{
+    await saveState();
+    // Scheduled emails are processed by the master Teacher account at sign-in.
+    if(currentUser()?.role === 'teacher'){
+      const ran = processAutomations(false);
+      if(ran > 0) await saveState();
+    }
+  }catch(error){
+    console.error('Login state update failed:', error);
+    // Do not block a valid login because Last Login could not be written.
   }
 
   document.getElementById('loginOverlay').classList.add('hidden');
   document.getElementById('appShell').classList.remove('hidden');
-  console.log("LOGIN SUCCESS", currentUserId, state);
   renderApp();
 }
 function logout(){
+  if((composeMode && composeDirty) && !confirm('You have an unsaved email. Sign out without saving it?')) return;
   if((templateManagerUnsaved || staffTemplateEditorDirty()) && !confirm('You have unsaved template changes. Sign out without saving them?')) return;
+  clearComposeState();
   templateManagerUnsaved=false;
   staffTemplateDraft=null;
   currentUserId = null;
+  flushDeferredRemoteState();
   document.getElementById('appShell').classList.add('hidden');
   document.getElementById('loginOverlay').classList.remove('hidden');
   document.getElementById('loginPassword').value = '';
   document.getElementById('loginMsg').innerHTML = '';
 }
 
-function deliverInternal(s, senderId, recipientId, subject, body, folder='inbox', attachments=[]){
-  const sender=s.users.find(u=>u.id===senderId); if(!sender) return;
-  const mail={id:uid('mail'),senderId, senderName:sender.displayName, senderEmail:sender.email, recipientId, subject, preview:body.slice(0,90), body, folder, read:false, flagged:false, category: sender.role==='staff' ? 'internal':'safe', timeLabel:shortTime(), sentAt:timestamp(), linkTarget:'', linkLabel:'', hints:[{target:'from',label:'Check whether you recognise the sender'},{target:'body',label:'Check what action is being asked for'}], attachments, replies:[]};
+function deliverInternal(s, senderId, recipientId, subject, body, folder='inbox', attachments=[], options={}){
+  const sender=s.users.find(u=>u.id===senderId);
+  const recipient=s.users.find(u=>u.id===recipientId);
+  if(!sender || !recipient) return null;
+  if(!s.mailboxes[recipientId]) s.mailboxes[recipientId]={inbox:[],archive:[],junk:[],deleted:[],sent:[],drafts:[]};
+  if(!s.mailboxes[senderId]) s.mailboxes[senderId]={inbox:[],archive:[],junk:[],deleted:[],sent:[],drafts:[]};
+
+  const toRecipients = clone(options.toRecipients || [{id:recipient.id, displayName:recipient.displayName, email:recipient.email}]);
+  const ccRecipients = clone(options.ccRecipients || []);
+  const mail={
+    id:uid('mail'), senderId, senderName:sender.displayName, senderEmail:sender.email,
+    recipientId, recipientName:recipient.displayName, recipientEmail:recipient.email,
+    toRecipients, ccRecipients,
+    subject, preview:body.slice(0,90), body, folder, read:false, flagged:false, reported:false,
+    category: sender.role==='staff' || sender.role==='teacher' ? 'internal':'safe',
+    timeLabel:shortTime(), sentAt:timestamp(), linkTarget:'', linkLabel:'',
+    hints:[{target:'from',label:'Check whether you recognise the sender'},{target:'body',label:'Check what action is being asked for'}],
+    attachments:cloneAttachments(attachments), replies:[], forwardedFrom:options.forwardedFrom || ''
+  };
+  s.mailboxes[recipientId][folder] = Array.isArray(s.mailboxes[recipientId][folder]) ? s.mailboxes[recipientId][folder] : [];
   s.mailboxes[recipientId][folder].unshift(mail);
-  const sentCopy=JSON.parse(JSON.stringify(mail)); sentCopy.id=uid('mail'); sentCopy.folder='sent'; sentCopy.read=true; s.mailboxes[senderId].sent.unshift(sentCopy);
+
+  const sentCopy=clone(mail);
+  sentCopy.id=uid('mail');
+  sentCopy.folder='sent';
+  sentCopy.read=true;
+  s.mailboxes[senderId].sent.unshift(sentCopy);
+  return {mail, sentCopy};
 }
 
 function allowedRecipients(user){
@@ -615,7 +690,7 @@ function allowedRecipients(user){
   if(state.settings?.allowStudentToStudent){
     state.users.filter(u=>u.active && u.role==='student' && u.id!==user.id).forEach(u=>map.set(u.id,u));
   }
-  ['inbox','junk','deleted'].forEach(folder=>{
+  ['inbox','archive','junk','deleted'].forEach(folder=>{
     state.mailboxes[user.id][folder].forEach(mail=>{
       if(mail.senderId){
         const sender=getUser(mail.senderId);
@@ -651,12 +726,14 @@ function ensureMobileShell(){
 
   document.getElementById('mobileStudentOverlay').onclick=closeMobileDrawer;
   document.getElementById('mobileMailTabBtn').onclick=()=>{
+    if(composeMode && !closeComposeEditor()) return;
     mobileStudentTab='mail';
     mobileStudentView='list';
     mailFolder = mailFolder==='calendar' ? 'inbox' : mailFolder;
     renderMailbox();
   };
   document.getElementById('mobileCalendarTabBtn').onclick=()=>{
+    if(composeMode && !closeComposeEditor()) return;
     mobileStudentTab='calendar';
     mobileStudentView='calendar';
     mailFolder='calendar';
@@ -695,8 +772,10 @@ drawer.innerHTML=`
 
   <div class="mobile-drawer-list">
     <button class="mobile-drawer-btn ${mailFolder==='inbox'?'active':''}" data-mobile-folder="inbox"><span>Inbox</span><span class="count">${counts.inbox}</span></button>
+    <button class="mobile-drawer-btn ${mailFolder==='archive'?'active':''}" data-mobile-folder="archive"><span>Archive</span><span class="count">${counts.archive}</span></button>
     <button class="mobile-drawer-btn ${mailFolder==='junk'?'active':''}" data-mobile-folder="junk"><span>Junk</span><span class="count">${counts.junk}</span></button>
     <button class="mobile-drawer-btn ${mailFolder==='sent'?'active':''}" data-mobile-folder="sent"><span>Sent</span><span class="count">${counts.sent}</span></button>
+    <button class="mobile-drawer-btn ${mailFolder==='drafts'?'active':''}" data-mobile-folder="drafts"><span>Drafts</span><span class="count">${counts.drafts}</span></button>
     <button class="mobile-drawer-btn ${mailFolder==='deleted'?'active':''}" data-mobile-folder="deleted"><span>Deleted</span><span class="count">${counts.deleted}</span></button>
   </div>
 
@@ -712,11 +791,11 @@ drawer.innerHTML=`
 
   drawer.querySelectorAll('[data-mobile-folder]').forEach(btn=>{
     btn.onclick=()=>{
+      if(composeMode && !closeComposeEditor()) return;
       mailFolder=btn.dataset.mobileFolder;
       mobileStudentTab='mail';
       mobileStudentView='list';
       selectedMailId=null;
-      composeMode=null;
       showHint=false;
       closeMobileDrawer();
       renderMailbox();
@@ -829,6 +908,8 @@ function renderApp(){
 
   document.getElementById('globalSearch').value='';
   searchTerm='';
+  const searchWrap=document.getElementById('globalSearch')?.closest('.search');
+  if(searchWrap) searchWrap.style.display = user.role==='teacher' ? 'none' : '';
   if(user.role==='teacher'){
     clearMobileStudentChrome();
     document.getElementById('adminView').classList.remove('hidden');
@@ -841,7 +922,7 @@ function renderApp(){
     if(user.role==='staff'){
       clearMobileStudentChrome();
 
-      if(!['inbox','junk','deleted','sent','templates','calendar'].includes(mailFolder)){
+      if(!['inbox','archive','junk','deleted','sent','drafts','templates','calendar'].includes(mailFolder)){
         mailFolder='inbox';
       }
 
@@ -957,7 +1038,7 @@ function renderStaffMailboxCalendarList(){
 
       <div class="student-selected-box">
         <div style="font-weight:800;margin-bottom:6px">Selected date</div>
-        <div class="muted">${esc(anchor.toLocaleDateString([], {weekday:'long', day:'numeric', month:'long', year:'numeric'}))}</div>
+        <div class="muted">${esc(anchor.toLocaleDateString('en-GB', {weekday:'long', day:'numeric', month:'long', year:'numeric'}))}</div>
         <div style="margin-top:12px">
           ${previewUserId && eventsForUserOnDate(previewUserId, anchor).length
             ? eventsForUserOnDate(previewUserId, anchor).map(ev=>`
@@ -1105,30 +1186,62 @@ function bindStaffMailboxCalendarReader(){
     };
   });
 }
+function updateMailboxToolbar(){
+  const user=currentUser();
+  const mail=currentMail();
+  const ids=['replyBtn','forwardBtn','deleteBtn','spamBtn','flagBtn','reportBtn','hintBtn','markUnreadBtn','archiveBtn','restoreBtn','permanentDeleteBtn'];
+  ids.forEach(id=>{ const el=document.getElementById(id); if(el) el.style.display='none'; });
+  if(composeMode || ['calendar','templates','drafts'].includes(mailFolder) || !mail) return;
+
+  const show=(id,label='')=>{ const el=document.getElementById(id); if(el){ el.style.display=''; if(label) el.textContent=label; } };
+
+  if(mailFolder==='deleted'){
+    show('restoreBtn','↩ Restore to Inbox');
+    show('permanentDeleteBtn','🗑 Delete permanently');
+    return;
+  }
+
+  if(mailFolder==='sent'){
+    show('forwardBtn','↪ Forward');
+    show('deleteBtn','🗑 Delete');
+    show('flagBtn', mail.flagged ? '⚑ Unflag' : '⚑ Flag');
+    return;
+  }
+
+  show('replyBtn','↩ Reply');
+  show('forwardBtn','↪ Forward');
+  show('deleteBtn','🗑 Delete');
+  show('flagBtn', mail.flagged ? '⚑ Unflag' : '⚑ Flag');
+  show('markUnreadBtn', mail.read ? '✉ Mark unread' : '✓ Mark read');
+  show('hintBtn','💡 Hint');
+
+  if(mailFolder==='junk') show('spamBtn','✓ Not junk');
+  else show('spamBtn','🚫 Mark as junk');
+
+  if(mailFolder==='inbox') show('archiveBtn','📦 Archive');
+  if(mailFolder==='archive') show('restoreBtn','↩ Move to Inbox');
+  if(user?.role==='student') show('reportBtn', mail.reported ? '✓ Reported' : '⚠ Report suspicious');
+}
 function renderMailbox(){
   const counts=folderCounts(currentUserId);
   const user = currentUser();
 
-document.querySelectorAll('[data-folder="templates"]').forEach(btn=>{
-  btn.style.display = user.role === 'student' ? 'none' : '';
-});
-  ['inbox','sent','drafts','junk','deleted'].forEach(k=>{
+  document.querySelectorAll('[data-folder="templates"]').forEach(btn=>{
+    btn.style.display = user.role === 'student' ? 'none' : '';
+  });
+  ['inbox','archive','sent','drafts','junk','deleted'].forEach(k=>{
     const el=document.getElementById('count-'+k);
     if(el) el.textContent=counts[k];
   });
-
-  const isCalendar=mailFolder==='calendar';
-  ['replyBtn','forwardBtn','deleteBtn','spamBtn','flagBtn','hintBtn','newMailBtn'].forEach(id=>{
-    const el=document.getElementById(id);
-    if(el) el.style.display=isCalendar?'none':'';
-  });
+  const calCount=document.getElementById('count-calendar');
+  if(calCount) calCount.textContent=(state.events[currentUserId]||[]).length;
 
   renderMailList();
   renderMailReader();
+  updateMailboxToolbar();
 
   if(isStudentMobile()){
     renderMobileStudentChrome();
-
     const reader=document.querySelector('.mail-reader');
     if(reader){
       const oldBack=reader.querySelector('.mobile-backbar');
@@ -1136,10 +1249,7 @@ document.querySelectorAll('[data-folder="templates"]').forEach(btn=>{
       if(mobileStudentTab==='mail' && mobileStudentView==='detail'){
         reader.insertAdjacentHTML('afterbegin', renderMobileBackBar());
         const backBtn=document.getElementById('mobileBackToListBtn');
-        if(backBtn) backBtn.onclick=()=>{
-          mobileStudentView='list';
-          renderMailbox();
-        };
+        if(backBtn) backBtn.onclick=()=>{ mobileStudentView='list'; renderMailbox(); };
       }
     }
   } else {
@@ -1187,7 +1297,7 @@ function deleteUserPermanently(userId){
   state.activityLog = (state.activityLog || []).filter(a => !matchingUserIds.has(a.userId));
 
   Object.values(state.mailboxes || {}).forEach(box => {
-    ['inbox', 'junk', 'deleted', 'sent'].forEach(folder => {
+    MAILBOX_FOLDERS.forEach(folder => {
       box[folder] = (box[folder] || []).filter(mail =>
         !matchingUserIds.has(mail.senderId) && !matchingUserIds.has(mail.recipientId)
       );
@@ -1195,12 +1305,6 @@ function deleteUserPermanently(userId){
   });
 
   if(matchingUserIds.has(selectedMailboxStudentId)) selectedMailboxStudentId = '';
-
-  console.log('Deleted user, duplicates and logins:', {
-    originalUserId: userId,
-    email: deletedEmail,
-    removedIds: Array.from(matchingUserIds)
-  });
 
   saveState();
 }
@@ -1225,7 +1329,7 @@ const filtered = studentManageClassId
   </button>
 
   ${peopleClassTabs('student')}
-</div><div class="panel table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Password</th><th>Status</th><th>Last login</th><th>Actions</th></tr></thead><tbody>${filtered.length?filtered.map(u=>`<tr><td>${esc(u.displayName)}</td><td>${esc(u.email)}</td><td>${esc(u.password)}</td><td>${u.active?'<span class="tag safe">Active</span>':'<span class="tag phishing">Inactive</span>'}</td><td>${esc(u.lastLogin||'Never')}</td><td><div class="row"><button class="mini-btn" data-edit-user="${u.id}">Edit</button><button class="mini-btn" data-open-box="${u.id}">Open mailbox</button><button class="btn-danger" data-delete-user="${u.id}">Delete student</button></div></td></tr>`).join(''):'<tr><td colspan="6" class="muted">No students in this class.</td></tr>'}</tbody></table></div></div>`;
+</div><div class="panel table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Password</th><th>Status</th><th>Last login</th><th>Actions</th></tr></thead><tbody>${filtered.length?filtered.map(u=>`<tr><td>${esc(u.displayName)}</td><td>${esc(u.email)}</td><td>${esc(u.password)}</td><td>${u.active?'<span class="tag safe">Active</span>':'<span class="tag phishing">Inactive</span>'}</td><td>${esc(u.lastLogin?formatDateTime(u.lastLogin):'Never')}</td><td><div class="row"><button class="mini-btn" data-edit-user="${u.id}">Edit</button><button class="mini-btn" data-open-box="${u.id}">Open mailbox</button><button class="btn-danger" data-delete-user="${u.id}">Delete student</button></div></td></tr>`).join(''):'<tr><td colspan="6" class="muted">No students in this class.</td></tr>'}</tbody></table></div></div>`;
   document.getElementById('addStudentBtn').onclick=()=>openUserModal('student');
   document.querySelectorAll('[data-student-class-tab]').forEach(b=>b.onclick=()=>{ studentManageClassId=b.dataset.studentClassTab; renderAdmin(); });
   document.querySelectorAll('[data-edit-user]').forEach(b=>b.onclick=()=>openUserModal('student',b.dataset.editUser));
@@ -1253,7 +1357,7 @@ function selectedSendClassStudentRows(classId){
 }
 function confirmDeleteUser(userId, roleLabel){
   const u=getUser(userId); if(!u) return;
-  openModal(`<h2>Delete ${roleLabel}</h2><p>This will permanently remove <strong>${esc(u.displayName)}</strong> and all their mailbox data from local storage.</p><div class="row"><button id="confirmDeleteBtn" class="btn-danger">Delete permanently</button><button id="cancelDeleteBtn" class="btn-secondary">Cancel</button></div>`,'narrow');
+  openModal(`<h2>Delete ${roleLabel}</h2><p>This will permanently remove <strong>${esc(u.displayName)}</strong> and all their mailbox data from PLC Mail.</p><div class="row"><button id="confirmDeleteBtn" class="btn-danger">Delete permanently</button><button id="cancelDeleteBtn" class="btn-secondary">Cancel</button></div>`,'narrow');
   document.getElementById('cancelDeleteBtn').onclick=closeModal;
   document.getElementById('confirmDeleteBtn').onclick=()=>{ deleteUserPermanently(userId); closeModal(); renderAdmin(); };
 }
@@ -1374,7 +1478,7 @@ function openUserModal(defaultRole='student', userId=''){
         classId
       });
 
-      state.mailboxes[u.id]={inbox:[],junk:[],deleted:[],sent:[],drafts:[]};
+      state.mailboxes[u.id]={inbox:[],archive:[],junk:[],deleted:[],sent:[],drafts:[]};
       state.events[u.id]=[];
     }
 
@@ -1793,11 +1897,11 @@ function rebuildStudents(){
   const ids = classSelect.value ? classStudentIds(classSelect.value) : [];
 
   if(!ids.length){
-    students.innerHTML = '<div class="muted">Choose a class first.</div>';
+    list.innerHTML = '<div class="muted">Choose a class first.</div>';
     return;
   }
 
-  students.innerHTML = ids.map(id=>{
+  list.innerHTML = ids.map(id=>{
     const u = getUser(id);
     if(!u) return '';
 
@@ -1838,13 +1942,13 @@ document.getElementById('saveAutoBtn').onclick=async ()=>{
 
 function openMailboxReview(userId){
   const user=getUser(userId);
-  openModal(`<h2>${esc(user.displayName)} mailbox</h2><div class="grid3"><div class="stat"><div class="num">${state.mailboxes[userId].inbox.length}</div><div class="label">Inbox</div></div><div class="stat"><div class="num">${state.mailboxes[userId].junk.length}</div><div class="label">Junk</div></div><div class="stat"><div class="num">${state.mailboxes[userId].deleted.length}</div><div class="label">Deleted</div></div></div><div style="height:18px"></div><div class="panel table-wrap"><table><thead><tr><th>Folder</th><th>From</th><th>Subject</th><th>Time</th></tr></thead><tbody>${['inbox','junk','deleted','sent'].flatMap(folder=>state.mailboxes[userId][folder].slice(0,12).map(m=>`<tr><td>${folderLabel(folder)}</td><td>${esc(m.senderName)}</td><td>${esc(m.subject)}</td><td>${esc(m.sentAt)}</td></tr>`)).join('') || '<tr><td colspan="4" class="muted">No emails yet.</td></tr>'}</tbody></table></div><div class="row" style="margin-top:16px"><button id="closeReviewBtn" class="btn-secondary">Close</button></div>`, 'compact');
+  openModal(`<h2>${esc(user.displayName)} mailbox</h2><div class="grid3"><div class="stat"><div class="num">${state.mailboxes[userId].inbox.length}</div><div class="label">Inbox</div></div><div class="stat"><div class="num">${state.mailboxes[userId].junk.length}</div><div class="label">Junk</div></div><div class="stat"><div class="num">${state.mailboxes[userId].deleted.length}</div><div class="label">Deleted</div></div></div><div style="height:18px"></div><div class="panel table-wrap"><table><thead><tr><th>Folder</th><th>From</th><th>Subject</th><th>Time</th></tr></thead><tbody>${['inbox','archive','junk','deleted','sent','drafts'].flatMap(folder=>(state.mailboxes[userId][folder]||[]).slice(0,12).map(m=>`<tr><td>${folderLabel(folder)}</td><td>${esc(m.senderName)}</td><td>${esc(m.subject)}</td><td>${esc(formatDateTime(m.sentAt))}</td></tr>`)).join('') || '<tr><td colspan="4" class="muted">No emails yet.</td></tr>'}</tbody></table></div><div class="row" style="margin-top:16px"><button id="closeReviewBtn" class="btn-secondary">Close</button></div>`, 'compact');
   document.getElementById('closeReviewBtn').onclick=closeModal;
 }
 
 
 window.addEventListener('beforeunload', (event)=>{
-  if(templateManagerUnsaved || staffTemplateEditorDirty()){
+  if((composeMode && composeDirty) || templateManagerUnsaved || staffTemplateEditorDirty()){
     event.preventDefault();
     event.returnValue='';
   }
@@ -1852,20 +1956,32 @@ window.addEventListener('beforeunload', (event)=>{
 
 function openChangePasswordModal(){
   const user=currentUser();
-  openModal(`<h2>Change password</h2><div class="field"><label>Current password</label><input id="oldPw" type="password"></div><div class="field"><label>New password</label><input id="newPw" type="text"></div><div class="row"><button id="savePwBtn" class="btn btn-primary">Save password</button><button id="cancelPwBtn" class="btn-secondary">Cancel</button></div><div id="pwMsg"></div>`,'narrow');
+  openModal(`<h2>Change password</h2><div class="field"><label>Current password</label><input id="oldPw" type="password" autocomplete="current-password"></div><div class="field"><label>New password</label><input id="newPw" type="password" autocomplete="new-password"></div><div class="row"><button id="savePwBtn" class="btn btn-primary">Save password</button><button id="cancelPwBtn" class="btn-secondary">Cancel</button></div><div id="pwMsg"></div>`,'narrow');
   document.getElementById('cancelPwBtn').onclick=closeModal;
-  document.getElementById('savePwBtn').onclick=()=>{
-    if(document.getElementById('oldPw').value!==user.password){ setMessage(document.getElementById('pwMsg'),'warn','Current password is incorrect.'); return; }
-    const np=document.getElementById('newPw').value.trim(); if(!np){ setMessage(document.getElementById('pwMsg'),'warn','Enter a new password.'); return; }
-    user.password=np; saveState(); setMessage(document.getElementById('pwMsg'),'ok', user.role==='teacher' ? 'Password updated.' : 'Password updated. Teachers can still see student passwords in the admin area.'); if(user.role==='teacher') renderAdmin();
+  document.getElementById('savePwBtn').onclick=async ()=>{
+    const login=(state.logins||[]).find(l=>l.userId===user.id);
+    const currentPassword=String(login?.password ?? user.password ?? '');
+    if(document.getElementById('oldPw').value!==currentPassword){ setMessage(document.getElementById('pwMsg'),'warn','Current password is incorrect.'); return; }
+    const np=document.getElementById('newPw').value.trim();
+    if(!np){ setMessage(document.getElementById('pwMsg'),'warn','Enter a new password.'); return; }
+    user.password=np;
+    if(login) login.password=np;
+    try{
+      await saveState();
+      setMessage(document.getElementById('pwMsg'),'ok', user.role==='student' ? 'Password updated. Teachers can still see learner passwords in the admin area.' : 'Password updated.');
+      if(user.role==='teacher') renderAdmin();
+    }catch(error){
+      console.error('Password save failed:', error);
+      setMessage(document.getElementById('pwMsg'),'warn','The password could not be saved. Please try again.');
+    }
   };
 }
 
 function folderCounts(uid){
-  const box=state.mailboxes[uid];
-
+  const box=state.mailboxes[uid] || {};
   return {
     inbox:(box.inbox || []).length,
+    archive:(box.archive || []).length,
     sent:(box.sent || []).length,
     drafts:(box.drafts || []).length,
     junk:(box.junk || []).length,
@@ -1982,6 +2098,7 @@ function composeSuggestionsHtml(query, which='to'){
 }
 
 function addComposeRecipient(which, itemType, itemId){
+  captureComposeDraft();
   const user = currentUser();
   const current = selectedComposeRecipients(which).slice();
 
@@ -1989,50 +2106,27 @@ function addComposeRecipient(which, itemType, itemId){
     if(user.role === 'student') return;
     const cls = state.classes.find(c => c.id === itemId);
     if(!cls) return;
-
-    const students = state.users
-      .filter(u => u.active && u.role === 'student' && u.classId === cls.id)
-      .map(u => ({
-        key: `user:${u.id}`,
-        type: 'user',
-        id: u.id,
-        label: `${u.displayName} (${u.email})`,
-        email: u.email,
-        displayName: u.displayName
-      }));
-
-    const merged = [...current];
-    students.forEach(s => {
-      if(!merged.some(x => x.key === s.key)) merged.push(s);
-    });
+    const students = state.users.filter(u => u.active && u.role === 'student' && u.classId === cls.id).map(recipientEntryForUser).filter(Boolean);
+    const merged=[...current];
+    students.forEach(item=>{ if(!merged.some(x=>x.key===item.key)) merged.push(item); });
     setSelectedComposeRecipients(which, merged);
+    composeDirty=true;
     return;
   }
 
-  const allowed = user.role === 'student'
-    ? allowedRecipients(user)
-    : state.users.filter(u => u.active);
-
+  const allowed = user.role === 'student' ? allowedRecipients(user) : state.users.filter(u => u.active);
   const target = allowed.find(u => u.id === itemId);
   if(!target) return;
-
-  const entry = {
-    key: `user:${target.id}`,
-    type: 'user',
-    id: target.id,
-    label: `${target.displayName} (${target.email})`,
-    email: target.email,
-    displayName: target.displayName
-  };
-
-  if(!current.some(x => x.key === entry.key)) current.push(entry);
+  const entry=recipientEntryForUser(target);
+  if(entry && !current.some(x => x.key === entry.key)) current.push(entry);
   setSelectedComposeRecipients(which, current);
+  composeDirty=true;
 }
-
 function removeComposeRecipient(which, key){
+  captureComposeDraft();
   setSelectedComposeRecipients(which, selectedComposeRecipients(which).filter(x => x.key !== key));
+  composeDirty=true;
 }
-
 function bindComposeAddressField(root=document){
   root.querySelectorAll('[data-remove-recipient]').forEach(btn => {
     btn.onclick = () => {
@@ -2041,123 +2135,55 @@ function bindComposeAddressField(root=document){
       renderMailReader();
     };
   });
-
   root.querySelectorAll('[data-add-recipient]').forEach(btn => {
     btn.onclick = () => {
       const [which, type, id] = btn.dataset.addRecipient.split('|');
       addComposeRecipient(which, type, id);
-      const input = document.getElementById(which === 'cc' ? 'msgCcSearch' : 'msgRecipientSearch');
-      if(input) input.value = '';
       renderMailReader();
     };
   });
-
-  const toInput = document.getElementById('msgRecipientSearch');
-  if(toInput){
-    toInput.oninput = () => {
-      composeRecipientMode = 'to';
-      const box = document.getElementById('msgToSuggestions');
-      if(box) box.innerHTML = composeSuggestionsHtml(toInput.value, 'to');
+  const bindInput=(id,which)=>{
+    const input=document.getElementById(id);
+    if(!input) return;
+    input.oninput=()=>{
+      const box=document.getElementById(which==='cc'?'msgCcSuggestions':'msgToSuggestions');
+      if(box) box.innerHTML=composeSuggestionsHtml(input.value,which);
       bindComposeAddressField(document);
     };
-    toInput.onkeydown = (e) => {
-      if(e.key === ' ' || e.key === 'Enter'){
-        const items = composeSuggestionItems(toInput.value, 'to');
+    input.onkeydown=(e)=>{
+      if(e.key==='Enter'){
+        const items=composeSuggestionItems(input.value,which);
         if(items.length){
           e.preventDefault();
-          addComposeRecipient('to', items[0].type, items[0].id);
-          toInput.value = '';
+          addComposeRecipient(which,items[0].type,items[0].id);
           renderMailReader();
         }
       }
     };
-  }
-
-  const ccInput = document.getElementById('msgCcSearch');
-  if(ccInput){
-    ccInput.oninput = () => {
-      composeRecipientMode = 'cc';
-      const box = document.getElementById('msgCcSuggestions');
-      if(box) box.innerHTML = composeSuggestionsHtml(ccInput.value, 'cc');
-      bindComposeAddressField(document);
-    };
-    ccInput.onkeydown = (e) => {
-      if(e.key === ' ' || e.key === 'Enter'){
-        const items = composeSuggestionItems(ccInput.value, 'cc');
-        if(items.length){
-          e.preventDefault();
-          addComposeRecipient('cc', items[0].type, items[0].id);
-          ccInput.value = '';
-          renderMailReader();
-        }
-      }
-    };
-  }
+  };
+  bindInput('msgRecipientSearch','to');
+  bindInput('msgCcSearch','cc');
 }
 function renderComposeReply(mail){
+  const addressMode=['new','forward','draft'].includes(composeMode);
+  const title=composeMode==='new'?'New message':composeMode==='reply'?'Reply':composeMode==='draft'?'Edit draft':'Forward message';
   return `<div class="compose-box">
-    <div class="split">
-      <h3 style="margin:0">${composeMode==='new'?'New message':composeMode==='reply'?'Reply':'Forward message'}</h3>
-      <button id="closeComposeBtn" class="btn-secondary">Close</button>
-    </div>
-
-    ${composeMode==='new' ? `
-      <div class="field" style="margin-top:12px">
-        <label>To</label>
-        ${composeRecipientTokensHtml('to')}
-        <input id="msgRecipientSearch" type="text" placeholder="Type a name, email or class">
-        <div id="msgToSuggestions">${composeSuggestionsHtml('', 'to')}</div>
-      </div>
-
-      <div class="field">
-        <label>CC</label>
-        ${composeRecipientTokensHtml('cc')}
-        <input id="msgCcSearch" type="text" placeholder="Type a name, email or class">
-        <div id="msgCcSuggestions">${composeSuggestionsHtml('', 'cc')}</div>
-      </div>
-
-      <div class="field">
-        <label>Subject</label>
-        <input id="msgSubject" type="text" placeholder="Enter subject">
-      </div>
-    ` : `
-      <div class="from-box" style="margin-top:12px">
-        <strong>To:</strong> ${composeMode==='reply'
-          ? `${esc(mail.senderName)} &lt;${esc(mail.senderEmail)}&gt;`
-          : 'Choose recipients in a new message'}
-      </div>
-    `}
-
+    <div class="split"><h3 style="margin:0">${title}</h3><button id="closeComposeBtn" class="btn-secondary">Close</button></div>
+    ${addressMode ? `
+      <div class="field" style="margin-top:12px"><label>To</label>${composeRecipientTokensHtml('to')}<input id="msgRecipientSearch" type="text" placeholder="Type a name, email or class"><div id="msgToSuggestions"></div></div>
+      <div class="field"><label>CC</label>${composeRecipientTokensHtml('cc')}<input id="msgCcSearch" type="text" placeholder="Type a name, email or class"><div id="msgCcSuggestions"></div></div>
+      <div class="field"><label>Subject</label><input id="msgSubject" type="text" placeholder="Enter subject"></div>
+    ` : `<div class="from-box" style="margin-top:12px"><strong>To:</strong> ${esc(mail?.senderName||'')} &lt;${esc(mail?.senderEmail||'')}&gt;</div>`}
     <textarea id="msgText" placeholder="Type your message..."></textarea>
-
-    <div class="field" style="margin-top:12px">
-      <label>Add attachments</label>
-      <input id="msgAttachments" type="file" multiple>
-      <div class="mini-note">Choose files from this device, including photos and documents.</div>
-    </div>
-
-    <div id="msgAttachmentSummary" class="soft-panel" style="margin-top:10px">
-      <div class="muted">No files selected yet.</div>
-    </div>
-
+    <div class="field" style="margin-top:12px"><label>Add attachments</label><input id="msgAttachments" type="file" multiple><div class="mini-note">Choose files from this device, including photos and documents.</div></div>
+    <div id="msgAttachmentSummary" class="soft-panel" style="margin-top:10px"></div>
     <div class="row" style="justify-content:space-between">
-      <div class="muted">
-        ${composeMode==='new'
-          ? (currentUser().role==='student'
-              ? 'Students can only email approved recipients.'
-              : 'Search people or classes and add multiple recipients.')
-          : 'Your sent message will appear below the email.'}
-      </div>
-            <div class="row">
-        ${composeMode==='new' ? '<button id="saveDraftBtn" class="btn-secondary">Save draft</button>' : ''}
-        <button id="sendMsgBtn" class="btn btn-primary">Send</button>
-      </div>
+      <div class="muted">${addressMode ? (currentUser().role==='student'?'Students can only email approved recipients.':'Search people or classes and add multiple recipients.') : 'Your sent reply will appear below the email.'}</div>
+      <div class="row">${addressMode?'<button id="saveDraftBtn" class="btn-secondary">Save draft</button>':''}<button id="sendMsgBtn" class="btn btn-primary">Send</button></div>
     </div>
-
     <div id="composeReplyMsg"></div>
   </div>`;
 }
-
 
 function openMonitoredInboxModal(userId){
   const mailboxUsers = monitorableMailboxUsers();
@@ -2177,7 +2203,7 @@ function renderMonitoredInboxModal(){
   const account = monitoredMailbox();
   if(!account){ monitoredMailboxUserId = mailboxUsers[0].id; }
   const user = monitoredMailbox();
-  const folders=['inbox','junk','deleted','sent'];
+  const folders=['inbox','archive','junk','deleted','sent'];
   let items = (state.mailboxes[user.id]?.[monitoredMailboxFolder] || []).slice();
   if(!monitoredMailboxSelectedMailId || !items.some(m=>m.id===monitoredMailboxSelectedMailId)) monitoredMailboxSelectedMailId = items[0]?.id || '';
   const mail = items.find(m=>m.id===monitoredMailboxSelectedMailId) || null;
@@ -2187,10 +2213,10 @@ function renderMonitoredInboxModal(){
       <div class="field"><label>Email account</label><select id="monitoredUserSelect">${mailboxUsers.map(u=>`<option value="${u.id}" ${u.id===user.id?'selected':''}>${esc(u.displayName)} (${esc(u.email)})</option>`).join('')}</select></div>
       <div class="soft-panel"><div style="font-weight:800">Currently viewing</div><div>${esc(user.displayName)}</div><div class="muted">${esc(user.email)}</div></div>
     </div>
-    <div class="row">${folders.map(folder=>`<button class="folder-btn ${folder===monitoredMailboxFolder?'active':''}" data-mon-folder="${folder}" style="width:auto;border:1px solid var(--line)"><span class="folder-left"><span>${folder==='inbox'?'📥':folder==='junk'?'🛡️':folder==='deleted'?'🗑️':'📤'}</span><span>${folderLabel(folder)}</span></span><span class="count">${state.mailboxes[user.id][folder].length}</span></button>`).join('')}</div>
+    <div class="row">${folders.map(folder=>`<button class="folder-btn ${folder===monitoredMailboxFolder?'active':''}" data-mon-folder="${folder}" style="width:auto;border:1px solid var(--line)"><span class="folder-left"><span>${folder==='inbox'?'📥':folder==='archive'?'📦':folder==='junk'?'🛡️':folder==='deleted'?'🗑️':'📤'}</span><span>${folderLabel(folder)}</span></span><span class="count">${state.mailboxes[user.id][folder].length}</span></button>`).join('')}</div>
     <div class="grid2" style="align-items:start">
       <div class="panel" style="padding:0;overflow:hidden"><div class="mail-head"><div><h2>${esc(folderLabel(monitoredMailboxFolder))}</h2><p>${items.length} messages</p></div></div><div class="mail-list" style="max-height:52vh">${items.length ? items.map(m=>`<button class="mail-item ${m.id===monitoredMailboxSelectedMailId?'active':''}" data-mon-mail="${m.id}"><div class="mail-top"><div style="min-width:0"><div class="mail-from"><span class="truncate unread">${esc(m.senderName)}</span></div><div class="truncate read">${esc(m.subject)}</div></div><span class="time">${esc(m.timeLabel || '')}</span></div><div class="preview truncate">${esc(m.preview || '')}</div></button>`).join('') : '<div class="panel" style="margin:14px">No messages in this folder.</div>'}</div></div>
-      <div class="panel">${mail ? `<div class="stack"><div class="split"><div><h3 style="margin:0">${esc(mail.subject)}</h3><div class="muted">${esc(mail.sentAt || '')}</div></div><span class="tag ${mail.category==='phishing'?'phishing':mail.category==='spam'?'spam':mail.category==='internal'?'internal':'safe'}">${esc(mail.category || 'safe')}</span></div><div class="from-box" style="margin-top:0"><strong>From:</strong> ${esc(mail.senderName)} &lt;${esc(mail.senderEmail)}&gt;</div><div class="from-box" style="margin-top:0"><strong>To:</strong> ${esc(user.email)}</div><div class="mail-body" style="margin-top:0">${bodyHtml(mail)}</div>${mail.attachments?.length?`<div class="attachment-wrap">${mail.attachments.map(a=>`<div class="attachment"><div><strong>${esc(a.filename)}</strong><div class="muted">${esc(a.filetype)} • ${esc(a.size)}</div></div></div>`).join('')}</div>`:''}${(mail.replies||[]).length?`<div class="stack">${mail.replies.map(r=>`<div class="reply-card"><div class="reply-head"><strong>${r.type==='reply'?'Student reply':'Message'}</strong><span>${esc(r.time)}</span></div><div style="white-space:pre-wrap;line-height:1.8">${esc(r.text)}</div></div>`).join('')}</div>`:''}</div>` : '<div class="muted">Select a message to read it.</div>'}</div>
+      <div class="panel">${mail ? `<div class="stack"><div class="split"><div><h3 style="margin:0">${esc(mail.subject)}</h3><div class="muted">${esc(formatDateTime(mail.sentAt))}</div></div><span class="tag ${mail.category==='phishing'?'phishing':mail.category==='spam'?'spam':mail.category==='internal'?'internal':'safe'}">${esc(mail.category || 'safe')}</span></div><div class="from-box" style="margin-top:0"><strong>From:</strong> ${esc(mail.senderName)} &lt;${esc(mail.senderEmail)}&gt;</div><div class="from-box" style="margin-top:0"><strong>To:</strong> ${esc(user.email)}</div><div class="mail-body" style="margin-top:0">${bodyHtml(mail)}</div>${mail.attachments?.length?`<div class="attachment-wrap">${mail.attachments.map(a=>`<div class="attachment"><div><strong>${esc(a.filename)}</strong><div class="muted">${esc(a.filetype)} • ${esc(a.size)}</div></div></div>`).join('')}</div>`:''}${(mail.replies||[]).length?`<div class="stack">${mail.replies.map(r=>`<div class="reply-card"><div class="reply-head"><strong>${r.type==='reply'?'Student reply':'Message'}</strong><span>${esc(r.time)}</span></div><div style="white-space:pre-wrap;line-height:1.8">${esc(r.text)}</div></div>`).join('')}</div>`:''}</div>` : '<div class="muted">Select a message to read it.</div>'}</div>
     </div>
   </div>`;
   document.getElementById('monitoredCloseBtn').onclick=closeModal;
@@ -2199,389 +2225,213 @@ function renderMonitoredInboxModal(){
   root.querySelectorAll('[data-mon-mail]').forEach(b=>b.onclick=()=>{ monitoredMailboxSelectedMailId=b.dataset.monMail; renderMonitoredInboxModal(); });
 }
 
+async function collectComposeNewAttachments(){
+  const output=[];
+  for(const file of composePendingFiles){ output.push(await fileToAttachment(file)); }
+  return output;
+}
+function composeRecipientSnapshot(list){
+  return list.map(item=>({id:item.id,displayName:item.displayName,email:item.email}));
+}
 async function sendCurrentMessage(){
-  const user = currentUser();
-  const text = document.getElementById('msgText').value.trim();
-  const msg = document.getElementById('composeReplyMsg');
+  const user=currentUser();
+  captureComposeDraft();
+  const text=(composeDraft.body||'').trim();
+  const msg=document.getElementById('composeReplyMsg');
+  if(!text){ setMessage(msg,'warn','Type a message first.'); return; }
 
-  let attachments = [];
-  try{
-    attachments = await collectRealAttachments('msgAttachments');
-  }catch(err){
-    setMessage(msg,'warn','One or more attachments could not be read.');
-    return;
-  }
+  let newAttachments=[];
+  try{ newAttachments=await collectComposeNewAttachments(); }
+  catch(error){ console.error('Attachment upload failed:',error); setMessage(msg,'warn','One or more attachments could not be uploaded. Please try again.'); return; }
+  const attachments=[...cloneAttachments(composeBaseAttachments),...newAttachments];
 
-  if(!text){
-    setMessage(msg,'warn','Type a message first.');
-    return;
-  }
-
-  if(composeMode==='new'){
-    const subject = document.getElementById('msgSubject').value.trim();
-
-    if(!composeSelectedTo.length){
-      setMessage(msg,'warn','Add at least one recipient.');
-      return;
+  if(['new','forward','draft'].includes(composeMode)){
+    const subject=(composeDraft.subject||'').trim();
+    if(!composeSelectedTo.length){ setMessage(msg,'warn','Add at least one recipient.'); return; }
+    if(!subject){
+      if(!confirm('Send this message without a subject?')) return;
+      composeDraft.subject='(No subject)';
     }
 
-if(!subject){
-  const composeBox = document.querySelector('.compose-box');
-
-  if(composeBox){
-    const oldPrompt = document.getElementById('missingSubjectPrompt');
-    if(oldPrompt) oldPrompt.remove();
-
-    composeBox.insertAdjacentHTML('afterbegin', `
-      <div id="missingSubjectPrompt" class="missing-subject-popup">
-        <div class="missing-subject-card">
-          <h3>Missing subject</h3>
-          <p>Do you want to send this message without a subject?</p>
-          <div class="row" style="justify-content:flex-end">
-            <button id="sendNoSubjectBtn" class="btn btn-primary" type="button">Send</button>
-            <button id="cancelNoSubjectBtn" class="btn-secondary" type="button">Don’t send</button>
-          </div>
-        </div>
-      </div>
-    `);
-
-    document.getElementById('cancelNoSubjectBtn').onclick=()=>{
-      document.getElementById('missingSubjectPrompt')?.remove();
+    const toUsers=composeSelectedTo.filter(x=>x.type==='user');
+    const ccUsers=composeSelectedCc.filter(x=>x.type==='user');
+    const all=[...toUsers,...ccUsers];
+    const sentIds=new Set();
+    const options={
+      toRecipients:composeRecipientSnapshot(toUsers),
+      ccRecipients:composeRecipientSnapshot(ccUsers),
+      forwardedFrom:composeMode==='forward' ? (currentMail()?.id||'') : ''
     };
-
-    document.getElementById('sendNoSubjectBtn').onclick=()=>{
-      document.getElementById('missingSubjectPrompt')?.remove();
-      document.getElementById('msgSubject').value='(No subject)';
-      sendCurrentMessage();
-    };
-  }
-
-  return;
-}
-
-    const toUsers = composeSelectedTo.filter(x => x.type === 'user');
-    const ccUsers = composeSelectedCc.filter(x => x.type === 'user');
-    const sentIds = new Set();
-
-    [...toUsers, ...ccUsers].forEach(recipient => {
+    all.forEach(recipient=>{
       if(sentIds.has(recipient.id)) return;
       sentIds.add(recipient.id);
-      deliverInternal(state, user.id, recipient.id, subject, text, 'inbox', attachments);
+      deliverInternal(state,user.id,recipient.id,composeDraft.subject,text,'inbox',attachments,options);
     });
-console.log("SEND DEBUG - after deliverInternal", {
-  from: user.displayName,
-  subject,
-  toUsers: toUsers.map(r => ({
-    id: r.id,
-    label: r.label,
-    displayName: r.displayName,
-    email: r.email
-  })),
-  ccUsers: ccUsers.map(r => ({
-    id: r.id,
-    label: r.label,
-    displayName: r.displayName,
-    email: r.email
-  })),
-  recipientInboxCheck: [...toUsers, ...ccUsers].map(r => ({
-    id: r.id,
-    name: r.displayName,
-    role: getUser(r.id)?.role,
-    inboxCount: state.mailboxes[r.id]?.inbox?.length,
-    latestSubject: state.mailboxes[r.id]?.inbox?.[0]?.subject,
-    latestRecipientId: state.mailboxes[r.id]?.inbox?.[0]?.recipientId
-  })),
-  senderSentCheck: {
-    senderId: user.id,
-    sentCount: state.mailboxes[user.id]?.sent?.length,
-    latestSentSubject: state.mailboxes[user.id]?.sent?.[0]?.subject,
-    latestSentRecipientId: state.mailboxes[user.id]?.sent?.[0]?.recipientId
-  }
-});
+
     if(user.role==='student'){
-      toUsers.forEach(recipient => {
-        const target = getUser(recipient.id);
-        logActivity(
-          target?.role==='student' ? 'student_peer_send' : 'student_send',
-          user.id,
-          'Sent an email to ' + (target?.displayName || recipient.label)
-        );
+      toUsers.forEach(recipient=>{
+        const target=getUser(recipient.id);
+        logActivity(target?.role==='student'?'student_peer_send':'student_send',user.id,'Sent an email to '+(target?.displayName||recipient.label));
       });
     }
 
-try{
-  await saveState();
-}catch(error){
-  console.error("SEND SAVE FAILED:", error);
-  setMessage(
-    msg,
-    'warn',
-    'The message was created, but it could not be saved. Check the console for the Firebase error.'
-  );
-  return;
-}
-const verifySnapshot = await getDoc(PLCMAIL_DOC);
-const verifyState = verifySnapshot.data();
-
-console.log("SEND DEBUG - after Firestore save", {
-  savedRecipientInboxCheck: [...toUsers, ...ccUsers].map(r => ({
-    id: r.id,
-    name: r.displayName,
-    role: verifyState.users.find(u => u.id === r.id)?.role,
-    inboxCount: verifyState.mailboxes[r.id]?.inbox?.length,
-    latestSubject: verifyState.mailboxes[r.id]?.inbox?.[0]?.subject,
-    latestRecipientId: verifyState.mailboxes[r.id]?.inbox?.[0]?.recipientId
-  })),
-  savedSenderSentCheck: {
-    senderId: user.id,
-    sentCount: verifyState.mailboxes[user.id]?.sent?.length,
-    latestSentSubject: verifyState.mailboxes[user.id]?.sent?.[0]?.subject,
-    latestSentRecipientId: verifyState.mailboxes[user.id]?.sent?.[0]?.recipientId
-  }
-});
-clearComposeDraft();
-composeMode = null;
-composeSelectedTo = [];
-composeSelectedCc = [];
-mailFolder = 'sent';
-selectedMailId = state.mailboxes[user.id].sent[0]?.id || null;
-renderMailbox();
-return;
-  }
-
-  const mail = currentMail();
-
-  if(composeMode==='reply'){
-    if(mail.senderId){
-      const sender = getUser(mail.senderId);
-
-      if(user.role==='student' && sender && sender.role==='student' && !state.settings?.allowStudentToStudent){
-        setMessage(msg,'warn','Students cannot reply to student accounts.');
-        return;
-      }
-
-      deliverInternal(state, user.id, mail.senderId, 'Re: ' + mail.subject, text, 'inbox', attachments);
+    if(composeEditingDraftId){
+      state.mailboxes[user.id].drafts=(state.mailboxes[user.id].drafts||[]).filter(d=>d.id!==composeEditingDraftId);
     }
 
+    try{ await saveState(); }
+    catch(error){ console.error('Message save failed:',error); setMessage(msg,'warn','The message could not be saved. Check the connection and try again.'); return; }
+
+    clearComposeState();
+    mailFolder='sent';
+    selectedMailId=state.mailboxes[user.id].sent[0]?.id||null;
+    renderMailbox();
+    return;
+  }
+
+  const mail=currentMail();
+  if(composeMode==='reply' && mail){
+    if(!mail.senderId){ setMessage(msg,'warn','This training email does not have a PLC Mail account to reply to.'); return; }
+    const sender=getUser(mail.senderId);
+    if(user.role==='student' && sender?.role==='student' && !state.settings?.allowStudentToStudent){ setMessage(msg,'warn','Students cannot reply to student accounts.'); return; }
+    const replySubject=/^Re:/i.test(mail.subject||'')?mail.subject:'Re: '+mail.subject;
+    deliverInternal(state,user.id,mail.senderId,replySubject,text,'inbox',attachments,{toRecipients:composeRecipientSnapshot([recipientEntryForUser(sender)].filter(Boolean))});
     if(user.role==='student'){
-      logActivity(
-        mail.category==='phishing' ? 'reply_phishing' :
-        mail.category==='spam' ? 'reply_spam' : 'student_send',
-        user.id,
-        mail.category==='phishing'
-          ? 'Replied to a phishing email'
-          : mail.category==='spam'
-            ? 'Replied to a spam email'
-            : 'Replied to ' + mail.senderName,
-        mail.category==='phishing' ? 'high' : mail.category==='spam' ? 'medium' : 'info'
-      );
+      logActivity(mail.category==='phishing'?'reply_phishing':mail.category==='spam'?'reply_spam':'student_send',user.id,mail.category==='phishing'?'Replied to a phishing email':mail.category==='spam'?'Replied to a spam email':'Replied to '+mail.senderName,mail.category==='phishing'?'high':mail.category==='spam'?'medium':'info');
     }
-
-    mail.replies = mail.replies || [];
-    mail.replies.push({type:'reply', text, time:shortTime()});
-try{
-  await saveState();
-}catch(error){
-  console.error("REPLY SAVE FAILED:", error);
-  setMessage(
-    msg,
-    'warn',
-    'The reply was created, but it could not be saved. Check the console for the Firebase error.'
-  );
-  return;
-}
-
-composeMode = null;
-renderMailbox();
-return;
+    mail.replies=mail.replies||[];
+    mail.replies.push({type:'reply',text,time:shortTime(),sentAt:timestamp()});
+    try{ await saveState(); }
+    catch(error){ console.error('Reply save failed:',error); setMessage(msg,'warn','The reply could not be saved. Check the connection and try again.'); return; }
+    clearComposeState();
+    renderMailbox();
   }
-
-  setMessage(msg,'warn','Forwarding is limited in this build. Use New message to send to users or classes.');
 }
 async function saveCurrentDraft(){
-
   const user=currentUser();
+  captureComposeDraft();
+  let newAttachments=[];
+  const msg=document.getElementById('composeReplyMsg');
+  try{ newAttachments=await collectComposeNewAttachments(); }
+  catch(error){ console.error('Draft attachment upload failed:',error); setMessage(msg,'warn','One or more attachments could not be uploaded. Please try again.'); return; }
+  const attachments=[...cloneAttachments(composeBaseAttachments),...newAttachments];
+  const subject=(composeDraft.subject||'').trim()||'(No subject)';
+  const body=composeDraft.body||'';
+  if(!body.trim() && subject==='(No subject)' && !composeSelectedTo.length && !attachments.length){ setMessage(msg,'warn','Add a recipient, subject, message or attachment before saving the draft.'); return; }
 
-  const subject=
-    document.getElementById('msgSubject')?.value.trim() ||
-    '(No subject)';
-
-  const body=
-    document.getElementById('msgText')?.value.trim() ||
-    '';
-
-  state.mailboxes[user.id].drafts = state.mailboxes[user.id].drafts || [];
-
-  state.mailboxes[user.id].drafts.unshift({
-    id:uid('mail'),
-    senderId:user.id,
-    senderName:user.displayName,
-    senderEmail:user.email,
-    recipientId:'',
-    subject,
-    preview:body.slice(0,90),
-    body,
-    folder:'drafts',
-    read:true,
-    flagged:false,
-    category:'safe',
-    timeLabel:shortTime(),
-    sentAt:timestamp(),
-    attachments:[],
-    replies:[]
-  });
-
-  await saveState();
-
-  composeMode=null;
+  const drafts=state.mailboxes[user.id].drafts=state.mailboxes[user.id].drafts||[];
+  const existing=composeEditingDraftId?drafts.find(d=>d.id===composeEditingDraftId):null;
+  const draft={
+    ...(existing||{}), id:existing?.id||uid('mail'), senderId:user.id,senderName:user.displayName,senderEmail:user.email,
+    recipientId:composeSelectedTo[0]?.id||'', recipientName:composeSelectedTo[0]?.displayName||'', recipientEmail:composeSelectedTo[0]?.email||'',
+    toRecipients:composeRecipientSnapshot(composeSelectedTo),ccRecipients:composeRecipientSnapshot(composeSelectedCc),
+    subject,preview:body.slice(0,90),body,folder:'drafts',read:true,flagged:false,reported:false,category:'safe',
+    timeLabel:shortTime(),sentAt:existing?.sentAt||timestamp(),updatedAt:timestamp(),attachments,replies:[]
+  };
+  if(existing) drafts[drafts.findIndex(d=>d.id===existing.id)]=draft; else drafts.unshift(draft);
+  try{ await saveState(); }
+  catch(error){ console.error('Draft save failed:',error); setMessage(msg,'warn','The draft could not be saved. Check the connection and try again.'); return; }
+  clearComposeState();
+  mailFolder='drafts';
+  selectedMailId=draft.id;
   renderMailbox();
 }
-function moveMail(newFolder){ const mail=currentMail(); if(!mail) return; const box=state.mailboxes[currentUserId][mailFolder]; const idx=box.findIndex(m=>m.id===mail.id); if(idx<0) return; box.splice(idx,1); mail.folder=newFolder; state.mailboxes[currentUserId][newFolder].unshift(mail); selectedMailId=null; saveState(); renderMailbox(); }
+function moveMail(newFolder){
+  const mail=currentMail(); if(!mail) return;
+  const box=state.mailboxes[currentUserId][mailFolder];
+  const idx=box.findIndex(m=>m.id===mail.id); if(idx<0) return;
+  box.splice(idx,1); mail.folder=newFolder;
+  state.mailboxes[currentUserId][newFolder]=state.mailboxes[currentUserId][newFolder]||[];
+  state.mailboxes[currentUserId][newFolder].unshift(mail);
+  selectedMailId=null; saveState(); renderMailbox();
+}
 function toggleFlag(){ const mail=currentMail(); if(!mail) return; mail.flagged=!mail.flagged; saveState(); renderMailbox(); }
+function toggleRead(){ const mail=currentMail(); if(!mail) return; mail.read=!mail.read; saveState(); renderMailbox(); }
+function restoreCurrentMail(){ if(mailFolder==='deleted'||mailFolder==='archive') moveMail('inbox'); }
+function permanentlyDeleteCurrentMail(){
+  const mail=currentMail(); if(!mail || mailFolder!=='deleted') return;
+  if(!confirm('Permanently delete this email? This cannot be undone.')) return;
+  state.mailboxes[currentUserId].deleted=(state.mailboxes[currentUserId].deleted||[]).filter(m=>m.id!==mail.id);
+  selectedMailId=null; saveState(); renderMailbox();
+}
+function reportSuspiciousMail(){
+  const mail=currentMail(); if(!mail) return;
+  if(!mail.reported && currentUser()?.role==='student'){
+    logActivity('reported_suspicious',currentUserId,'Reported a suspicious email: '+(mail.subject||'(No subject)'),'positive',{subject:mail.subject||''});
+  }
+  mail.reported=true;
+  if(mailFolder!=='junk'){
+    const source=state.mailboxes[currentUserId][mailFolder];
+    const idx=source.findIndex(m=>m.id===mail.id);
+    if(idx>=0) source.splice(idx,1);
+    mail.folder='junk';
+    state.mailboxes[currentUserId].junk.unshift(mail);
+    mailFolder='junk';
+  }
+  selectedMailId=mail.id;
+  saveState(); renderMailbox();
+}
 
 function bindEvents(){
-  document.getElementById('modalOverlay').addEventListener('click', e=>{ 
-    if(e.target.id==='modalOverlay') closeModal(); 
-  });
+  document.getElementById('modalOverlay').addEventListener('click', e=>{ if(e.target.id==='modalOverlay') closeModal(); });
+  const doLogin=()=>login(document.getElementById('loginEmail').value,document.getElementById('loginPassword').value);
+  document.getElementById('loginBtn').onclick=doLogin;
+  ['loginEmail','loginPassword'].forEach(id=>document.getElementById(id).addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); doLogin(); } }));
 
-  document.getElementById('loginBtn').onclick=()=>login(
-    document.getElementById('loginEmail').value, 
-    document.getElementById('loginPassword').value
-  );
-
-  const resetBtn = document.getElementById('resetDemoBtn');
-
-  if(resetBtn){
-    resetBtn.onclick = () => {
-      resetDemo();
-      setMessage(document.getElementById('loginMsg'),'ok','Demo data reset...');
-    };
-  }
-
-  const quickComposeBtn = document.getElementById('quickComposeBtn');
-
-if(quickComposeBtn){
-  quickComposeBtn.onclick = async () => {
-    if(isStaffUser() && mailFolder === 'templates'){
+  const quickComposeBtn=document.getElementById('quickComposeBtn');
+  if(quickComposeBtn) quickComposeBtn.onclick=()=>{
+    if(isStaffUser() && mailFolder==='templates'){
       if(!canLeaveStaffTemplateEditor()) return;
-      staffTemplateDraft = createBlankStaffTemplate();
-      selectedTemplateId = staffTemplateDraft.id;
-      const root=document.getElementById('readerInner');
-      if(root){ root.dataset.editing = staffTemplateDraft.id; root.dataset.templateDirty='0'; }
-      renderMailbox();
-      return;
+      staffTemplateDraft=createBlankStaffTemplate(); selectedTemplateId=staffTemplateDraft.id;
+      const root=document.getElementById('readerInner'); if(root){root.dataset.editing=staffTemplateDraft.id;root.dataset.templateDirty='0';}
+      renderMailbox(); return;
     }
-
-    composeMode = 'new';
-    composeSelectedTo = [];
-    composeSelectedCc = [];
-
-    if(isStudentMobile()){
-      mobileStudentTab = 'mail';
-      mobileStudentView = 'detail';
-    }
-
+    beginNewCompose();
+    if(isStudentMobile()){ mobileStudentTab='mail'; mobileStudentView='detail'; }
     renderMailbox();
   };
-}
 
-  const avatarBtn = document.getElementById('avatar');
-
-  if(avatarBtn){
-    avatarBtn.onclick = (e) => {
-      if(isStudentMobile()){
-        e.preventDefault();
-        e.stopPropagation();
-        openMobileDrawer();
-      }
-    };
-  }
-
+  const avatarBtn=document.getElementById('avatar');
+  if(avatarBtn) avatarBtn.onclick=(e)=>{ if(isStudentMobile()){e.preventDefault();e.stopPropagation();openMobileDrawer();} };
   document.getElementById('logoutBtn').onclick=logout;
   document.getElementById('topChangePw').onclick=()=>openChangePasswordModal();
-  document.getElementById('globalSearch').addEventListener('input', e=>{
-    searchTerm=e.target.value;
-    if(currentUser() && currentUser().role!=='teacher') renderMailbox();
-  });
+  document.getElementById('globalSearch').addEventListener('input',e=>{searchTerm=e.target.value;if(currentUser()&&currentUser().role!=='teacher')renderMailbox();});
 
   document.querySelectorAll('.folder-btn').forEach(btn=>btn.onclick=()=>{
+    if(btn.dataset.folder==='templates' && currentUser()?.role==='student') return;
+    if(composeMode && !closeComposeEditor()) return;
     if(isStaffUser() && mailFolder==='templates' && btn.dataset.folder!=='templates' && !canLeaveStaffTemplateEditor()) return;
     if(isStaffUser() && mailFolder==='templates' && btn.dataset.folder!=='templates') staffTemplateDraft=null;
-    mailFolder=btn.dataset.folder;
-    selectedMailId=null;
-    composeMode=null;
-    showHint=false;
-
+    mailFolder=btn.dataset.folder; selectedMailId=null; showHint=false;
     if(isStudentMobile()){
-      if(mailFolder==='calendar'){
-        mobileStudentTab='calendar';
-        mobileStudentView='calendar';
-      } else {
-        mobileStudentTab='mail';
-        mobileStudentView='list';
-      }
+      if(mailFolder==='calendar'){mobileStudentTab='calendar';mobileStudentView='calendar';}
+      else {mobileStudentTab='mail';mobileStudentView='list';}
     }
-
-    renderMailbox();
+    if(!flushDeferredRemoteState()) renderMailbox();
   });
 
-  document.getElementById('replyBtn').onclick=()=>{
-    if(mailFolder!=='calendar'){
-      composeMode='reply';
-      if(isStudentMobile()) mobileStudentView='detail';
-      renderMailReader();
-    }
-  };
+  document.getElementById('replyBtn').onclick=()=>{ const mail=currentMail(); if(mail){beginReplyCompose(mail);if(isStudentMobile())mobileStudentView='detail';renderMailReader();updateMailboxToolbar();} };
+  document.getElementById('forwardBtn').onclick=()=>{ const mail=currentMail(); if(mail){beginForwardCompose(mail);if(isStudentMobile())mobileStudentView='detail';renderMailReader();updateMailboxToolbar();} };
+  document.getElementById('deleteBtn').onclick=()=>{ if(!['calendar','deleted'].includes(mailFolder)) moveMail('deleted'); };
+  document.getElementById('spamBtn').onclick=()=>{ if(mailFolder==='junk') moveMail('inbox'); else if(!['calendar','deleted','sent','drafts'].includes(mailFolder)) moveMail('junk'); };
+  document.getElementById('flagBtn').onclick=()=>toggleFlag();
+  document.getElementById('reportBtn').onclick=()=>reportSuspiciousMail();
+  document.getElementById('markUnreadBtn').onclick=()=>toggleRead();
+  document.getElementById('archiveBtn').onclick=()=>{ if(mailFolder==='inbox') moveMail('archive'); };
+  document.getElementById('restoreBtn').onclick=()=>restoreCurrentMail();
+  document.getElementById('permanentDeleteBtn').onclick=()=>permanentlyDeleteCurrentMail();
+  document.getElementById('hintBtn').onclick=()=>{showHint=!showHint;renderMailReader();};
+  document.getElementById('newMailBtn').onclick=()=>{ if(composeMode&&!closeComposeEditor())return;beginNewCompose();if(isStudentMobile())mobileStudentView='detail';renderMailReader();updateMailboxToolbar();};
 
-  document.getElementById('forwardBtn').onclick=()=>{
-    if(mailFolder!=='calendar'){
-      composeMode='forward';
-      if(isStudentMobile()) mobileStudentView='detail';
-      renderMailReader();
-    }
-  };
-
-  document.getElementById('deleteBtn').onclick=()=>{ if(mailFolder!=='calendar' && mailFolder!=='deleted') moveMail('deleted'); };
-  document.getElementById('spamBtn').onclick=()=>{ if(mailFolder!=='calendar' && mailFolder!=='junk') moveMail('junk'); };
-  document.getElementById('flagBtn').onclick=()=>{ if(mailFolder!=='calendar') toggleFlag(); };
-  document.getElementById('hintBtn').onclick=()=>{ if(mailFolder!=='calendar'){ showHint=!showHint; renderMailReader(); } };
-
-document.getElementById('newMailBtn').onclick=()=>{
-  composeMode='new';
-  composeSelectedTo=[];
-  composeSelectedCc=[];
-  if(isStudentMobile()) mobileStudentView='detail';
-  renderMailReader();
-};
-
-window.addEventListener('resize', ()=>{
-  if(!currentUser() || currentUser().role === 'teacher') return;
-
-  const active = document.activeElement;
-  const isTyping =
-    active &&
-    (
-      active.tagName === 'INPUT' ||
-      active.tagName === 'TEXTAREA' ||
-      active.tagName === 'SELECT' ||
-      active.isContentEditable
-    );
-
-  // On mobile, opening the keyboard triggers resize.
-  // Do not redraw the mailbox while the user is typing.
-  if(isTyping) return;
-
-  if(!isStudentMobile()){
-    mobileStudentTab = 'mail';
-    mobileStudentView = 'list';
-    closeMobileDrawer();
-  }
-
-  renderMailbox();
-});
+  window.addEventListener('resize',()=>{
+    if(!currentUser()||currentUser().role==='teacher')return;
+    const active=document.activeElement;
+    const isTyping=active&&(active.tagName==='INPUT'||active.tagName==='TEXTAREA'||active.tagName==='SELECT'||active.isContentEditable);
+    if(isTyping||composeMode)return;
+    if(!isStudentMobile()){mobileStudentTab='mail';mobileStudentView='list';closeMobileDrawer();}
+    renderMailbox();
+  });
 }
-
-
 
 let dashboardClassTabId = '';
 let staffTabMode = 'accounts';
@@ -2606,27 +2456,88 @@ let composeDraft = {
 function captureComposeDraft(){
   const subjectEl = document.getElementById('msgSubject');
   const bodyEl = document.getElementById('msgText');
-
   if(subjectEl) composeDraft.subject = subjectEl.value;
   if(bodyEl) composeDraft.body = bodyEl.value;
 }
-
+function renderComposeAttachmentSummary(){
+  const box=document.getElementById('msgAttachmentSummary');
+  if(!box) return;
+  const saved=composeBaseAttachments.map(a=>`<div class="split compose-saved-attachment"><div><strong>${esc(a.filename||'Attachment')}</strong><div class="mini-note">Already attached</div></div><button type="button" class="mini-btn" data-remove-compose-att="${esc(a.id)}">Remove</button></div>`).join('');
+  const pending=composePendingFiles.map(f=>`<div class="split"><div><strong>${esc(f.name)}</strong><div class="mini-note">Ready to upload</div></div><span class="mini-note">${formatBytes(f.size)}</span></div>`).join('');
+  box.innerHTML = saved + pending || '<div class="muted">No files selected yet.</div>';
+  box.querySelectorAll('[data-remove-compose-att]').forEach(btn=>btn.onclick=()=>{
+    composeBaseAttachments=composeBaseAttachments.filter(a=>a.id!==btn.dataset.removeComposeAtt);
+    composeDirty=true;
+    renderComposeAttachmentSummary();
+  });
+}
 function restoreComposeDraft(){
   const subjectEl = document.getElementById('msgSubject');
   const bodyEl = document.getElementById('msgText');
-
   if(subjectEl) subjectEl.value = composeDraft.subject || '';
   if(bodyEl) bodyEl.value = composeDraft.body || '';
-
-  if(subjectEl) subjectEl.oninput = captureComposeDraft;
-  if(bodyEl) bodyEl.oninput = captureComposeDraft;
+  if(subjectEl) subjectEl.oninput = ()=>{ captureComposeDraft(); composeDirty=true; };
+  if(bodyEl) bodyEl.oninput = ()=>{ captureComposeDraft(); composeDirty=true; };
+  const files=document.getElementById('msgAttachments');
+  if(files) files.onchange=()=>{ composePendingFiles=Array.from(files.files||[]); composeDirty=true; renderComposeAttachmentSummary(); };
+  renderComposeAttachmentSummary();
 }
-
-function clearComposeDraft(){
-  composeDraft = {
-    subject: '',
-    body: ''
-  };
+function clearComposeState(){
+  composeDraft = {subject:'', body:''};
+  composeSelectedTo=[];
+  composeSelectedCc=[];
+  composeBaseAttachments=[];
+  composePendingFiles=[];
+  composeEditingDraftId='';
+  composeDirty=false;
+  composeMode=null;
+}
+function recipientEntryForUser(user){
+  if(!user) return null;
+  return {key:`user:${user.id}`,type:'user',id:user.id,label:`${user.displayName} (${user.email})`,email:user.email,displayName:user.displayName};
+}
+function normaliseDraftRecipients(list=[]){
+  return (list||[]).map(item=>{
+    const id=typeof item==='string'?item:item.id;
+    const user=getUser(id);
+    return recipientEntryForUser(user);
+  }).filter(Boolean);
+}
+function beginNewCompose(){
+  clearComposeState();
+  composeMode='new';
+}
+function beginReplyCompose(mail){
+  clearComposeState();
+  composeMode='reply';
+  composeDraft.body='';
+}
+function beginForwardCompose(mail){
+  clearComposeState();
+  composeMode='forward';
+  composeDraft.subject=/^Fwd:/i.test(mail.subject||'') ? mail.subject : `Fwd: ${mail.subject||'(No subject)'}`;
+  composeDraft.body=`\n\n---------- Forwarded message ----------\nFrom: ${mail.senderName} <${mail.senderEmail}>\nDate: ${formatDateTime(mail.sentAt)}\nSubject: ${mail.subject||'(No subject)'}\n\n${mail.body||''}`;
+  composeBaseAttachments=cloneAttachments(mail.attachments||[]);
+}
+function beginDraftCompose(draft){
+  clearComposeState();
+  composeMode='draft';
+  composeEditingDraftId=draft.id;
+  composeDraft.subject=draft.subject==='(No subject)'?'':(draft.subject||'');
+  composeDraft.body=draft.body||'';
+  composeSelectedTo=normaliseDraftRecipients(draft.toRecipients || (draft.recipientId?[{id:draft.recipientId}]:[]));
+  composeSelectedCc=normaliseDraftRecipients(draft.ccRecipients || []);
+  composeBaseAttachments=cloneAttachments(draft.attachments||[]);
+}
+function confirmDiscardCompose(){
+  if(!composeMode) return true;
+  if(!composeDirty) return true;
+  return confirm(composeMode==='draft' ? 'Discard changes made to this draft?' : 'Discard this unsaved email?');
+}
+function closeComposeEditor(){
+  if(!confirmDiscardCompose()) return false;
+  clearComposeState();
+  return true;
 }
 function migrateState(){
   state.settings = state.settings || {allowStudentToStudent:false};
@@ -2645,20 +2556,41 @@ function migrateState(){
   });
   state.events = state.events || {};
   state.users.forEach(u=>{
-    if(!state.mailboxes[u.id]) state.mailboxes[u.id] = {inbox:[], junk:[], deleted:[], sent:[],drafts:[]};
+    if(!state.mailboxes[u.id]) state.mailboxes[u.id] = {inbox:[], archive:[], junk:[], deleted:[], sent:[],drafts:[]};
     if(!Array.isArray(state.events[u.id])) state.events[u.id] = [];
     if(state.events[u.id].some(ev => ev && !ev.date)) state.events[u.id] = [];
   });
   if(!dashboardClassTabId && state.classes[0]) dashboardClassTabId = state.classes[0].id;
   if(!staffCalendarStudentId){ const firstStudent = state.users.find(u=>u.role==='student' && u.active); staffCalendarStudentId = firstStudent ? firstStudent.id : ''; }
 }
+function setLoginReady(ready, message=''){
+  loginReady=ready;
+  const btn=document.getElementById('loginBtn');
+  if(btn) btn.disabled=!ready;
+  const status=document.getElementById('loginStatus');
+  if(status){
+    status.textContent=message || (ready ? 'Connected to PLC Mail' : 'Connecting to PLC Mail…');
+    status.className='login-status ' + (ready?'ok':'');
+  }
+}
 async function init(){
-  await loadInitialStateFromFirestore();
-  ensureStateShape();
-  cleanDuplicateAccounts();
-  startFirestoreSync();
-  document.getElementById('loginEmail').value = '';
-  document.getElementById('loginPassword').value = '';
+  setLoginReady(false,'Connecting to PLC Mail…');
+  try{
+    await loadInitialStateFromFirestore();
+    ensureStateShape();
+    cleanDuplicateAccounts();
+    startFirestoreSync();
+    document.getElementById('loginEmail').value = '';
+    document.getElementById('loginPassword').value = '';
+    setLoginReady(true,'Connected to PLC Mail');
+    window.dispatchEvent(new CustomEvent('plcmail-ready'));
+  }catch(error){
+    console.error('PLC Mail startup failed:', error);
+    setLoginReady(false,'Could not connect to PLC Mail');
+    const msg=document.getElementById('loginMsg');
+    if(msg) setMessage(msg,'warn','PLC Mail could not connect. Check the internet connection, refresh the page, or try a current version of Chrome or Edge.');
+    window.dispatchEvent(new CustomEvent('plcmail-startup-error'));
+  }
 }
 
 function createInitialState(){
@@ -2704,7 +2636,7 @@ function createInitialState(){
   ];
   const classes=[{id:mint,name:'Mint'},{id:peach,name:'Peach'},{id:amber,name:'Amber'},{id:teal,name:'Teal'},{id:sage,name:'Sage'},{id:orange,name:'Orange'}];
   const s={ users, logins, classes, templates:buildTemplates(), automations:[], mailboxes:{}, events:{}, activityLog:[], settings:{allowStudentToStudent:false}, meta:{lastAutomationRun:''} };
-  users.forEach(u=>{ s.mailboxes[u.id]={inbox:[],junk:[],deleted:[],sent:[],drafts:[]}; s.events[u.id]=[]; });
+  users.forEach(u=>{ s.mailboxes[u.id]={inbox:[],archive:[],junk:[],deleted:[],sent:[],drafts:[]}; s.events[u.id]=[]; });
   seedDemoMail(s, teacher, staff, students);
   s.automations.push({id:uid('auto'), kind:'template', name:'Daily phishing practice',active:true,templateId:s.templates.find(t=>t.group==='Phishing / scam')?.id || '',frequency:'Daily',quantity:1,folder:'inbox',studentIds:[students[0].id,students[1].id],lastRun:'',createdBy:teacher.id});
   return s;
@@ -2716,7 +2648,7 @@ function logActivity(type, userId, detail, severity='info', meta={}){
   state.activityLog = state.activityLog.slice(0,120);
 }
 function activityIcon(type){
-  return type==='student_send'?'📤':type==='student_peer_send'?'👥':type==='reply_spam'?'⚠️':type==='reply_phishing'?'🚨':type==='phish_open'?'🔗':type==='phish_submit'?'🧾':'📝';
+  return type==='student_send'?'📤':type==='student_peer_send'?'👥':type==='reply_spam'?'⚠️':type==='reply_phishing'?'🚨':type==='phish_open'?'🔗':type==='phish_submit'?'🧾':type==='reported_suspicious'?'✅':'📝';
 }
 function classForUser(userId){ return getUser(userId)?.classId || ''; }
 function classActivities(classId){ return (state.activityLog||[]).filter(a=>!a.cleared && classForUser(a.userId)===classId); }
@@ -2734,11 +2666,11 @@ function renderStaffInboxPage(){
   if(!staffInboxUserId || !mailboxUsers.some(u=>u.id===staffInboxUserId)) staffInboxUserId=mailboxUsers[0]?.id || '';
   const user=getUser(staffInboxUserId);
   if(!user) return '<div class="panel"><div class="muted">No staff inboxes available.</div></div>';
-  const folders=['inbox','junk','deleted','sent'];
+  const folders=['inbox','archive','junk','deleted','sent'];
   const items=(state.mailboxes[user.id]?.[staffInboxFolder]||[]).slice();
   if(!staffInboxSelectedMailId || !items.some(m=>m.id===staffInboxSelectedMailId)) staffInboxSelectedMailId=items[0]?.id || '';
   const mail=items.find(m=>m.id===staffInboxSelectedMailId) || null;
-  return `<div class="stack"><div class="split"><div><h3 style="margin:0">Staff inbox</h3><div class="muted">Open teacher and staff mailboxes on a full page.</div></div></div><div class="grid2"><div class="field"><label>Email account</label><select id="staffInboxSelect">${mailboxUsers.map(u=>`<option value="${u.id}" ${u.id===user.id?'selected':''}>${esc(u.displayName)} (${esc(u.email)})</option>`).join('')}</select></div><div class="soft-panel"><div style="font-weight:800">Currently viewing</div><div>${esc(user.displayName)}</div><div class="muted">Inbox ${state.mailboxes[user.id].inbox.length} • Junk ${state.mailboxes[user.id].junk.length} • Deleted ${state.mailboxes[user.id].deleted.length} • Sent ${state.mailboxes[user.id].sent.length}</div></div></div><div class="row">${folders.map(folder=>`<button class="folder-btn ${folder===staffInboxFolder?'active':''}" data-staff-folder="${folder}" style="width:auto;border:1px solid var(--line)"><span class="folder-left"><span>${folder==='inbox'?'📥':folder==='junk'?'🛡️':folder==='deleted'?'🗑️':'📤'}</span><span>${folderLabel(folder)}</span></span><span class="count">${state.mailboxes[user.id][folder].length}</span></button>`).join('')}</div><div class="grid2" style="align-items:start"><div class="panel" style="padding:0;overflow:hidden"><div class="mail-head"><div><h2>${esc(folderLabel(staffInboxFolder))}</h2><p>${items.length} messages</p></div></div><div class="mail-list" style="max-height:58vh">${items.length ? items.map(m=>`<button class="mail-item ${m.id===staffInboxSelectedMailId?'active':''}" data-staff-mail="${m.id}"><div class="mail-top"><div style="min-width:0"><div class="mail-from"><span class="truncate unread">${esc(m.senderName)}</span></div><div class="truncate read">${esc(m.subject)}</div></div><span class="time">${esc(m.timeLabel || '')}</span></div><div class="preview truncate">${esc(m.preview || '')}</div></button>`).join('') : '<div class="panel" style="margin:14px">No messages in this folder.</div>'}</div></div><div class="panel">${mail ? `<div class="stack"><div class="split"><div><h3 style="margin:0">${esc(mail.subject)}</h3><div class="muted">${esc(mail.sentAt || '')}</div></div><span class="tag ${mail.category==='phishing'?'phishing':mail.category==='spam'?'spam':mail.category==='internal'?'internal':'safe'}">${esc(mail.category || 'safe')}</span></div><div class="from-box" style="margin-top:0"><strong>From:</strong> ${esc(mail.senderName)} &lt;${esc(mail.senderEmail)}&gt;</div><div class="from-box" style="margin-top:0"><strong>To:</strong> ${esc(user.email)}</div><div class="mail-body" style="margin-top:0">${bodyHtml(mail)}</div>${(mail.replies||[]).length?`<div class="stack">${mail.replies.map(r=>`<div class="reply-card"><div class="reply-head"><strong>${r.type==='reply'?'Student reply':'Message'}</strong><span>${esc(r.time)}</span></div><div style="white-space:pre-wrap;line-height:1.8">${esc(r.text)}</div></div>`).join('')}</div>`:''}</div>` : '<div class="muted">Select a message to read it.</div>'}</div></div></div>`;
+  return `<div class="stack"><div class="split"><div><h3 style="margin:0">Staff inbox</h3><div class="muted">Open teacher and staff mailboxes on a full page.</div></div></div><div class="grid2"><div class="field"><label>Email account</label><select id="staffInboxSelect">${mailboxUsers.map(u=>`<option value="${u.id}" ${u.id===user.id?'selected':''}>${esc(u.displayName)} (${esc(u.email)})</option>`).join('')}</select></div><div class="soft-panel"><div style="font-weight:800">Currently viewing</div><div>${esc(user.displayName)}</div><div class="muted">Inbox ${state.mailboxes[user.id].inbox.length} • Archive ${(state.mailboxes[user.id].archive||[]).length} • Junk ${state.mailboxes[user.id].junk.length} • Deleted ${state.mailboxes[user.id].deleted.length} • Sent ${state.mailboxes[user.id].sent.length}</div></div></div><div class="row">${folders.map(folder=>`<button class="folder-btn ${folder===staffInboxFolder?'active':''}" data-staff-folder="${folder}" style="width:auto;border:1px solid var(--line)"><span class="folder-left"><span>${folder==='inbox'?'📥':folder==='archive'?'📦':folder==='junk'?'🛡️':folder==='deleted'?'🗑️':'📤'}</span><span>${folderLabel(folder)}</span></span><span class="count">${state.mailboxes[user.id][folder].length}</span></button>`).join('')}</div><div class="grid2" style="align-items:start"><div class="panel" style="padding:0;overflow:hidden"><div class="mail-head"><div><h2>${esc(folderLabel(staffInboxFolder))}</h2><p>${items.length} messages</p></div></div><div class="mail-list" style="max-height:58vh">${items.length ? items.map(m=>`<button class="mail-item ${m.id===staffInboxSelectedMailId?'active':''}" data-staff-mail="${m.id}"><div class="mail-top"><div style="min-width:0"><div class="mail-from"><span class="truncate unread">${esc(m.senderName)}</span></div><div class="truncate read">${esc(m.subject)}</div></div><span class="time">${esc(m.timeLabel || '')}</span></div><div class="preview truncate">${esc(m.preview || '')}</div></button>`).join('') : '<div class="panel" style="margin:14px">No messages in this folder.</div>'}</div></div><div class="panel">${mail ? `<div class="stack"><div class="split"><div><h3 style="margin:0">${esc(mail.subject)}</h3><div class="muted">${esc(formatDateTime(mail.sentAt))}</div></div><span class="tag ${mail.category==='phishing'?'phishing':mail.category==='spam'?'spam':mail.category==='internal'?'internal':'safe'}">${esc(mail.category || 'safe')}</span></div><div class="from-box" style="margin-top:0"><strong>From:</strong> ${esc(mail.senderName)} &lt;${esc(mail.senderEmail)}&gt;</div><div class="from-box" style="margin-top:0"><strong>To:</strong> ${esc(user.email)}</div><div class="mail-body" style="margin-top:0">${bodyHtml(mail)}</div>${(mail.replies||[]).length?`<div class="stack">${mail.replies.map(r=>`<div class="reply-card"><div class="reply-head"><strong>${r.type==='reply'?'Student reply':'Message'}</strong><span>${esc(r.time)}</span></div><div style="white-space:pre-wrap;line-height:1.8">${esc(r.text)}</div></div>`).join('')}</div>`:''}</div>` : '<div class="muted">Select a message to read it.</div>'}</div></div></div>`;
 }
 function bindStaffInboxPage(){
   const select=document.getElementById('staffInboxSelect'); if(select) select.onchange=(e)=>{ staffInboxUserId=e.target.value; staffInboxFolder='inbox'; staffInboxSelectedMailId=''; renderAdmin(); };
@@ -2756,7 +2688,7 @@ function renderStaffPage(main){
   const inboxPanel = renderStaffInboxPage();
   main.innerHTML=`<div class="stack"><div class="split"><div><h2 style="margin:0">Staff</h2><p class="muted">Manage staff accounts, inboxes, or student calendars.</p></div><button id="addStaffBtn" class="btn btn-primary">Add staff</button></div>
   <div class="row"><button class="chip-btn ${staffTabMode==='accounts'?'active':''}" data-staff-tab="accounts">Accounts</button><button class="chip-btn ${staffTabMode==='inbox'?'active':''}" data-staff-tab="inbox">Inbox</button><button class="chip-btn ${staffTabMode==='calendar'?'active':''}" data-staff-tab="calendar">Calendar</button></div>
-  ${staffTabMode==='accounts' ? `<div class="panel table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Password</th><th>Status</th><th>Last login</th><th>Actions</th></tr></thead><tbody>${list.map(u=>`<tr><td>${esc(u.displayName)}</td><td>${esc(u.email)}</td><td>${esc(u.password)}</td><td>${u.active?'<span class="tag safe">Active</span>':'<span class="tag phishing">Inactive</span>'}</td><td>${esc(u.lastLogin || 'Never')}</td><td><div class="row"><button class="mini-btn" data-edit-staff="${u.id}">Edit</button><button class="mini-btn" data-open-staff-page="${u.id}">Open inbox</button><button class="btn-danger" data-delete-staff="${u.id}">Delete staff</button></div></td></tr>`).join('')}</tbody></table></div>` : staffTabMode==='inbox' ? inboxPanel : calendarPanel}
+  ${staffTabMode==='accounts' ? `<div class="panel table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Password</th><th>Status</th><th>Last login</th><th>Actions</th></tr></thead><tbody>${list.map(u=>`<tr><td>${esc(u.displayName)}</td><td>${esc(u.email)}</td><td>${esc(u.password)}</td><td>${u.active?'<span class="tag safe">Active</span>':'<span class="tag phishing">Inactive</span>'}</td><td>${esc(u.lastLogin?formatDateTime(u.lastLogin):'Never')}</td><td><div class="row"><button class="mini-btn" data-edit-staff="${u.id}">Edit</button><button class="mini-btn" data-open-staff-page="${u.id}">Open inbox</button><button class="btn-danger" data-delete-staff="${u.id}">Delete staff</button></div></td></tr>`).join('')}</tbody></table></div>` : staffTabMode==='inbox' ? inboxPanel : calendarPanel}
   </div>`;
   document.getElementById('addStaffBtn').onclick=()=>openUserModal('staff');
   document.querySelectorAll('[data-staff-tab]').forEach(b=>b.onclick=()=>{ staffTabMode=b.dataset.staffTab; renderAdmin(); });
@@ -2774,7 +2706,7 @@ function getAnchorDate(str){
     return new Date(parts[0], parts[1]-1, parts[2], 12, 0, 0, 0);
   }
   const d=new Date(str);
-  return isNaN(d) ? new Date() : d;
+  return Number.isNaN(d.getTime()) ? new Date() : d;
 }
 function localDateKey(d){
   const year=d.getFullYear();
@@ -2783,7 +2715,7 @@ function localDateKey(d){
   return `${year}-${month}-${day}`;
 }
 
-function formatMonthLabel(d){ return d.toLocaleDateString([], {month:'long', year:'numeric'}); }
+function formatMonthLabel(d){ return d.toLocaleDateString('en-GB', {month:'long', year:'numeric'}); }
 function sameDate(a,b){
   return a && b && localDateKey(a)===localDateKey(b);
 }
@@ -2851,7 +2783,7 @@ function renderCalendarForUser(userId, view='day', anchorStr='', editable=false)
 
     for(let h=6; h<=21; h++){
       const hh=String(h).padStart(2,'0');
-      const label=new Date(`2000-01-01T${hh}:00:00`).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+      const label=new Date(`2000-01-01T${hh}:00:00`).toLocaleTimeString('en-GB', {hour:'numeric', minute:'2-digit'});
 
       const slotEvents=events.filter(ev=>{
         if(!ev.startTime) return false;
@@ -2877,8 +2809,8 @@ function renderCalendarForUser(userId, view='day', anchorStr='', editable=false)
     return `<div class="student-day-shell">
       <div class="student-day-scroll">
         <div class="student-day-header">
-          <div>${esc(anchor.toLocaleDateString([], {weekday:'short'}))}</div>
-          <div>${esc(anchor.toLocaleDateString([], {weekday:'long', day:'numeric', month:'long', year:'numeric'}))}</div>
+          <div>${esc(anchor.toLocaleDateString('en-GB', {weekday:'short'}))}</div>
+          <div>${esc(anchor.toLocaleDateString('en-GB', {weekday:'long', day:'numeric', month:'long', year:'numeric'}))}</div>
         </div>
         ${rows}
       </div>
@@ -3085,14 +3017,16 @@ function openCalendarEventEditor(userId, eventId='', options={}){
       </select></div>
       <div class="field"><label>Custom repeat dates</label><input id="eventCustomDates" type="text" value="${esc((existing?.customDates||[]).join(', '))}" placeholder="2026-04-18, 2026-04-25"></div>
     </div>
-    ${targetClassId && !existing?`<div class="soft-panel" style="margin:12px 0">This event will be added to every student in <strong>${esc(targetClassName)}</strong>.</div>`:''}
+    ${targetClassId?`<div class="soft-panel" style="margin:12px 0">${existing?'Changes will be applied to the linked class event where possible.':'This event will be added to every learner in'} <strong>${esc(targetClassName)}</strong>.</div>`:''}
     <div class="field"><label>Description</label><textarea id="eventDesc">${esc(existing?.description||'')}</textarea></div>
     <div class="row"><button id="saveEventBtn" class="btn btn-primary">Save event</button>${existing?'<button id="deleteEventBtn" class="btn-danger">Delete event</button>':''}<button id="cancelEventBtn" class="btn-secondary">Cancel</button></div>
     <div id="eventMsg"></div>`, 'compact');
 
   document.getElementById('cancelEventBtn').onclick=closeModal;
+  const classStudentIdsForEvent=()=>state.users.filter(u=>u.role==='student' && u.active && u.classId===targetClassId).map(u=>u.id);
+  const matchesLegacyClassCopy=(ev)=>!!ev && !!existing && !existing.seriesId && ev.title===existing.title && ev.date===existing.date && (ev.startTime||'')===(existing.startTime||'') && (ev.endTime||'')===(existing.endTime||'');
 
-  document.getElementById('saveEventBtn').onclick=()=>{
+  document.getElementById('saveEventBtn').onclick=async ()=>{
     const title=document.getElementById('eventTitle').value.trim();
     const date=document.getElementById('eventDate').value;
     const startTime=document.getElementById('eventStart').value;
@@ -3100,58 +3034,49 @@ function openCalendarEventEditor(userId, eventId='', options={}){
     const description=document.getElementById('eventDesc').value.trim();
     const repeat=document.getElementById('eventRepeat').value;
     const customDates=document.getElementById('eventCustomDates').value.split(',').map(s=>s.trim()).filter(Boolean);
+    if(!title || !date){ setMessage(document.getElementById('eventMsg'),'warn','Enter a title and date.'); return; }
 
-    if(!title || !date){
-      setMessage(document.getElementById('eventMsg'),'warn','Enter a title and date.');
-      return;
-    }
-
-    if(targetClassId && !existing){
-      const targetIds = state.users.filter(u=>u.role==='student' && u.active && u.classId===targetClassId).map(u=>u.id);
+    if(targetClassId){
+      const targetIds=classStudentIdsForEvent();
+      const seriesId=existing?.seriesId || uid('evtseries');
       targetIds.forEach(tid=>{
         state.events[tid]=Array.isArray(state.events[tid])?state.events[tid]:[];
-        state.events[tid].push({
-          id:uid('evt'),
-          title,
-          date,
-          startTime,
-          endTime,
-          description,
-          repeat,
-          customDates
-        });
+        let idx=state.events[tid].findIndex(ev=>ev.seriesId===seriesId);
+        if(idx<0 && existing?.seriesId) idx=state.events[tid].findIndex(ev=>ev.seriesId===existing.seriesId);
+        if(idx<0 && !existing?.seriesId) idx=state.events[tid].findIndex(matchesLegacyClassCopy);
+        const old=idx>=0?state.events[tid][idx]:null;
+        const payload=normaliseCalendarEvent({id:old?.id||uid('evt'),seriesId,title,date,startTime,endTime,description,repeat,customDates});
+        if(idx>=0) state.events[tid][idx]=payload; else state.events[tid].push(payload);
       });
     } else {
       state.events[userId]=Array.isArray(state.events[userId])?state.events[userId]:[];
-      const payload={
-        id:existing?.id || uid('evt'),
-        title,
-        date,
-        startTime,
-        endTime,
-        description,
-        repeat,
-        customDates
-      };
+      const payload=normaliseCalendarEvent({id:existing?.id||uid('evt'),seriesId:existing?.seriesId||'',title,date,startTime,endTime,description,repeat,customDates});
       const idx=state.events[userId].findIndex(e=>e.id===payload.id);
-      if(idx>=0) state.events[userId][idx]=payload;
-      else state.events[userId].push(payload);
+      if(idx>=0) state.events[userId][idx]=payload; else state.events[userId].push(payload);
     }
-
-    saveState();
+    await saveState();
     closeModal();
     renderAdmin();
   };
 
   const del=document.getElementById('deleteEventBtn');
-  if(del) del.onclick=()=>{
-    state.events[userId]=(state.events[userId]||[]).filter(e=>e.id!==eventId);
-    saveState();
+  if(del) del.onclick=async ()=>{
+    if(targetClassId){
+      const ids=classStudentIdsForEvent();
+      ids.forEach(tid=>{
+        state.events[tid]=(state.events[tid]||[]).filter(ev=>{
+          if(existing?.seriesId) return ev.seriesId!==existing.seriesId;
+          return !matchesLegacyClassCopy(ev);
+        });
+      });
+    } else {
+      state.events[userId]=(state.events[userId]||[]).filter(e=>e.id!==eventId);
+    }
+    await saveState();
     closeModal();
     renderAdmin();
   };
 }
-
 
 function templateHintsForType(type){
   if(type==='phishing') return [{target:'from',label:'Check the sender email address'},{target:'body',label:'Look for urgency or requests for personal details'}];
@@ -3162,26 +3087,46 @@ function gatherTemplateEditorValues(){
   const type=document.getElementById('tplEditType').value;
   return { id:document.getElementById('sendPageTemplate').value || uid('tpl'), group:document.getElementById('sendPageGroup').value, type, senderName:document.getElementById('tplEditSenderName').value.trim() || 'Sender', senderEmail:document.getElementById('tplEditSenderEmail').value.trim() || 'sender@plcmail.com', subject:document.getElementById('tplEditSubject').value.trim() || 'Untitled template', preview:document.getElementById('tplEditPreview').value.trim(), body:document.getElementById('tplEditBody').value, defaultFolder:document.getElementById('sendPageFolder').value, linkTarget:document.getElementById('tplEditLinkTarget').value, hints:templateHintsForType(type) };
 }
+function automationIsDue(auto, force=false){
+  if(force) return true;
+  const now=new Date();
+  const today=todayKey();
+  if(auto.lastRun===today) return false;
+  if(auto.frequency==='Weekdays') return weekdayNum()<=5;
+  if(auto.frequency==='Weekly'){
+    if(!auto.lastRun) return true;
+    const last=new Date(auto.lastRun + 'T00:00:00');
+    if(Number.isNaN(last.getTime())) return true;
+    return (now.getTime()-last.getTime()) >= 6.5*24*60*60*1000;
+  }
+  return true;
+}
 function processAutomations(force=false){
   const today=todayKey();
+  let ran=0;
   state.automations.filter(a=>a.active).forEach(auto=>{
-    if(!force && auto.lastRun===today) return;
-    if(auto.frequency==='Weekdays' && weekdayNum()>5) return;
-    if(auto.frequency==='Weekly' && weekdayNum()!==1 && !force) return;
+    if(!automationIsDue(auto, force)) return;
     const studentIds=(auto.studentIds||[]).filter(id=>getUser(id));
     if(!studentIds.length) return;
     for(let i=0;i<Math.max(1, Number(auto.quantity||1));i++){
       if(auto.kind==='custom'){
-        studentIds.forEach(studentId=>deliverInternal(state, auto.senderId, studentId, auto.subject, auto.body, auto.folder||'inbox', JSON.parse(JSON.stringify(auto.attachments||[]))));
+        studentIds.forEach(studentId=>deliverInternal(state, auto.senderId, studentId, auto.subject, auto.body, auto.folder||'inbox', cloneAttachments(auto.attachments||[])));
       } else {
         const template = auto.templateSnapshot || state.templates.find(t=>t.id===auto.templateId);
         if(!template) return;
         studentIds.forEach(studentId=>deliverTemplateToUser(state, template, studentId, auto.folder||template.defaultFolder));
-        if((auto.attachments||[]).length){ studentIds.forEach(studentId=>{ const latest=state.mailboxes[studentId][auto.folder||template.defaultFolder][0]; if(latest) latest.attachments=JSON.parse(JSON.stringify(auto.attachments)); }); }
+        if((auto.attachments||[]).length){
+          studentIds.forEach(studentId=>{
+            const latest=state.mailboxes[studentId][auto.folder||template.defaultFolder][0];
+            if(latest) latest.attachments=[...cloneAttachments(latest.attachments||[]),...cloneAttachments(auto.attachments||[])];
+          });
+        }
       }
     }
     auto.lastRun=today;
+    ran += 1;
   });
+  return ran;
 }
 function getStudentPeerMessages(classId=''){
   const students = state.users.filter(u=>u.role==='student' && u.active && (!classId || u.classId===classId));
@@ -3190,7 +3135,7 @@ function getStudentPeerMessages(classId=''){
   students.forEach(u=>{
     (state.mailboxes[u.id]?.sent || []).forEach(mail=>{ const recipient = getUser(mail.recipientId); if(recipient && recipient.role==='student'){ all.push({sender:u, recipient, mail}); } });
   });
-  return all.sort((a,b)=>new Date(b.mail.sentAt||0)-new Date(a.mail.sentAt||0));
+  return all.sort((a,b)=>new Date(b.mail.sentAt||0).getTime()-new Date(a.mail.sentAt||0).getTime());
 }
 function openStudentPeerMailboxModal(classId=''){
   if(classId) dashboardClassTabId = classId;
@@ -3201,15 +3146,29 @@ function renderStudentPeerMailboxModal(){
   const root=document.getElementById('peerMailboxRoot'); if(!root) return;
   const classId = dashboardClassTabId || state.classes[0]?.id || '';
   const msgs = getStudentPeerMessages(classId);
-  root.innerHTML=`<div class="stack"><div class="split"><div><h2 style="margin:0">Student to student email box</h2><p class="muted">Review emails students have sent to each other.</p></div><button id="peerCloseBtn" class="btn-secondary">Close</button></div><div class="row">${state.classes.map(c=>`<button class="chip-btn ${classId===c.id?'active':''}" data-peer-class="${c.id}">${esc(c.name)} <span class="badge-red">${getStudentPeerMessages(c.id).length}</span></button>`).join('')}</div><div class="panel table-wrap"><table><thead><tr><th>From</th><th>To</th><th>Subject</th><th>Time</th><th>Open</th></tr></thead><tbody>${msgs.length?msgs.map((entry,idx)=>`<tr><td>${esc(entry.sender.displayName)}</td><td>${esc(entry.recipient.displayName)}</td><td>${esc(entry.mail.subject)}</td><td>${esc(entry.mail.sentAt||'')}</td><td><button class="mini-btn" data-peer-open="${idx}">Read</button></td></tr>`).join(''):'<tr><td colspan="5" class="muted">No student-to-student emails in this class.</td></tr>'}</tbody></table></div></div>`;
+  root.innerHTML=`<div class="stack"><div class="split"><div><h2 style="margin:0">Student to student email box</h2><p class="muted">Review emails students have sent to each other.</p></div><button id="peerCloseBtn" class="btn-secondary">Close</button></div><div class="row">${state.classes.map(c=>`<button class="chip-btn ${classId===c.id?'active':''}" data-peer-class="${c.id}">${esc(c.name)} <span class="badge-red">${getStudentPeerMessages(c.id).length}</span></button>`).join('')}</div><div class="panel table-wrap"><table><thead><tr><th>From</th><th>To</th><th>Subject</th><th>Time</th><th>Open</th></tr></thead><tbody>${msgs.length?msgs.map((entry,idx)=>`<tr><td>${esc(entry.sender.displayName)}</td><td>${esc(entry.recipient.displayName)}</td><td>${esc(entry.mail.subject)}</td><td>${esc(formatDateTime(entry.mail.sentAt))}</td><td><button class="mini-btn" data-peer-open="${idx}">Read</button></td></tr>`).join(''):'<tr><td colspan="5" class="muted">No student-to-student emails in this class.</td></tr>'}</tbody></table></div></div>`;
   document.getElementById('peerCloseBtn').onclick=closeModal;
   root.querySelectorAll('[data-peer-class]').forEach(b=>b.onclick=()=>{ dashboardClassTabId=b.dataset.peerClass; renderStudentPeerMailboxModal(); });
-  root.querySelectorAll('[data-peer-open]').forEach(b=>b.onclick=()=>{ const entry=msgs[Number(b.dataset.peerOpen)]; openModal(`<h2>${esc(entry.mail.subject)}</h2><div class="stack"><div class="soft-panel"><div><strong>From:</strong> ${esc(entry.sender.displayName)} (${esc(entry.sender.email)})</div><div><strong>To:</strong> ${esc(entry.recipient.displayName)} (${esc(entry.recipient.email)})</div><div class="muted">${esc(entry.mail.sentAt||'')}</div></div><div class="template-preview-box">${esc(entry.mail.body||'')}</div><div class="row"><button id="peerReadClose" class="btn-secondary">Close</button></div></div>`, 'compact'); document.getElementById('peerReadClose').onclick=closeModal; });
+  root.querySelectorAll('[data-peer-open]').forEach(b=>b.onclick=()=>{ const entry=msgs[Number(b.dataset.peerOpen)]; openModal(`<h2>${esc(entry.mail.subject)}</h2><div class="stack"><div class="soft-panel"><div><strong>From:</strong> ${esc(entry.sender.displayName)} (${esc(entry.sender.email)})</div><div><strong>To:</strong> ${esc(entry.recipient.displayName)} (${esc(entry.recipient.email)})</div><div class="muted">${esc(formatDateTime(entry.mail.sentAt))}</div></div><div class="template-preview-box">${esc(entry.mail.body||'')}</div><div class="row"><button id="peerReadClose" class="btn-secondary">Close</button></div></div>`, 'compact'); document.getElementById('peerReadClose').onclick=closeModal; });
 }
-function openFakePage(type){ const cfg=fakePages[type]; if(!cfg) return; if(currentUser()?.role==='student') logActivity('phish_open', currentUserId, 'Opened a suspicious link: ' + cfg.title, 'high', {subject:cfg.title}); openModal(`<h2>${esc(cfg.title)}</h2><p>Enter your details below.</p>${cfg.fields.map((f,i)=>`<div class="field"><label>${esc(f)}</label><input type="${f.toLowerCase().includes('password')?'password':'text'}" data-fake="${i}" placeholder="${esc(f)}"></div>`).join('')}<div class="row"><button id="fakeSubmitBtn" class="btn btn-primary">Sign in</button><button id="fakeCloseBtn" class="btn-secondary">Close</button></div><div id="fakeMsg"></div>`, 'narrow'); document.getElementById('fakeCloseBtn').onclick=closeModal; document.getElementById('fakeSubmitBtn').onclick=()=>{ const entered=Array.from(document.querySelectorAll('[data-fake]')).some(i=>i.value.trim()); if(entered && currentUser()?.role==='student') logActivity('phish_submit', currentUserId, 'Entered details into a scam page: ' + cfg.title, 'high', {subject:cfg.title}); setMessage(document.getElementById('fakeMsg'),'warn', entered ? '<strong>This was a scam page.</strong><br>You should not enter personal or banking information into pages reached from suspicious emails. Check the sender address, spelling, urgency, and the web address before signing in.' : 'Even opening a suspicious page is a warning sign. Stop, close it, and check the email carefully before entering any details.'); } }
-
-
-
+function openFakePage(type){
+  const cfg=fakePages[type];
+  if(!cfg) return;
+  if(currentUser()?.role==='student'){
+    logActivity('phish_open', currentUserId, 'Opened a suspicious link: ' + cfg.title, 'high', {subject:cfg.title});
+    saveState().catch(error=>console.error('Could not save phishing activity:', error));
+  }
+  openModal(`<h2>${esc(cfg.title)}</h2><p>Enter your details below.</p>${cfg.fields.map((f,i)=>`<div class="field"><label>${esc(f)}</label><input type="${f.toLowerCase().includes('password')?'password':'text'}" data-fake="${i}" placeholder="${esc(f)}"></div>`).join('')}<div class="row"><button id="fakeSubmitBtn" class="btn btn-primary">Sign in</button><button id="fakeCloseBtn" class="btn-secondary">Close</button></div><div id="fakeMsg"></div>`, 'narrow');
+  document.getElementById('fakeCloseBtn').onclick=closeModal;
+  document.getElementById('fakeSubmitBtn').onclick=()=>{
+    const entered=Array.from(document.querySelectorAll('[data-fake]')).some(i=>i.value.trim());
+    if(entered && currentUser()?.role==='student'){
+      logActivity('phish_submit', currentUserId, 'Entered details into a scam page: ' + cfg.title, 'high', {subject:cfg.title});
+      saveState().catch(error=>console.error('Could not save phishing activity:', error));
+    }
+    setMessage(document.getElementById('fakeMsg'),'warn', entered ? '<strong>This was a scam page.</strong><br>You should not enter personal or banking information into pages reached from suspicious emails. Check the sender address, spelling, urgency, and the web address before signing in.' : 'Even opening a suspicious page is a warning sign. Stop, close it, and check the email carefully before entering any details.');
+  };
+}
 /* ===== v9 overrides ===== */
 
 fakePages['fake-payment']={ title:'Secure Payment Page', fields:['Full name','Card number','Expiry date','Security code'] };
@@ -3343,18 +3302,18 @@ function deliverTemplateToUser(s, tpl, userId, folderOverride=''){
   const folder=folderOverride || tpl.defaultFolder || 'inbox';
 
   if(!s.mailboxes[userId]){
-    s.mailboxes[userId]={inbox:[],sent:[],drafts:[],junk:[],deleted:[]};
+    s.mailboxes[userId]={inbox:[],archive:[],sent:[],drafts:[],junk:[],deleted:[]};
   }
 
   if(!s.mailboxes[userId][folder]){
     s.mailboxes[userId][folder]=[];
   }
 
-  const senderName = applyMailMergeText(tpl.senderName || 'Sender', user, tpl.senderName, tpl.senderEmail);
-  const senderEmail = applyMailMergeText(tpl.senderEmail || 'sender@plcmail.com', user, tpl.senderName, tpl.senderEmail);
-  const subject = applyMailMergeText(tpl.subject || '(No subject)', user, senderName, senderEmail);
-  const preview = applyMailMergeText(tpl.preview || '', user, senderName, senderEmail);
-  const body = applyMailMergeText(tpl.body || '', user, senderName, senderEmail);
+  const senderName = applyMailMergeText(tpl.senderName || 'Sender', user, tpl.senderName, tpl.senderEmail, s);
+  const senderEmail = applyMailMergeText(tpl.senderEmail || 'sender@plcmail.com', user, tpl.senderName, tpl.senderEmail, s);
+  const subject = applyMailMergeText(tpl.subject || '(No subject)', user, senderName, senderEmail, s);
+  const preview = applyMailMergeText(tpl.preview || '', user, senderName, senderEmail, s);
+  const body = applyMailMergeText(tpl.body || '', user, senderName, senderEmail, s);
 
   const mail={
     id:uid('mail'),
@@ -3370,6 +3329,7 @@ function deliverTemplateToUser(s, tpl, userId, folderOverride=''){
     folder,
     read:false,
     flagged:false,
+    reported:false,
     category:tpl.type || 'safe',
     timeLabel:shortTime(),
     sentAt:timestamp(),
@@ -3424,11 +3384,11 @@ function mailMergeTokensHtml(){
   </div>`;
 }
 
-function applyMailMergeText(text, student, senderName='', senderEmail=''){
+function applyMailMergeText(text, student, senderName='', senderEmail='', sourceState=state){
   const fullName = student?.displayName || '';
   const firstName = fullName.split(' ')[0] || fullName;
   const email = student?.email || '';
-  const cls = student?.classId ? className(student.classId) : '';
+  const cls = student?.classId ? className(student.classId, sourceState) : '';
   const today = new Date().toLocaleDateString('en-GB');
 
   return String(text || '')
@@ -3473,7 +3433,7 @@ function openAttachment(mail, attId){
         <strong>${esc(a.filename)}</strong>
         <div class="muted">${esc(a.filetype)} • ${esc(a.size)}</div>
       </div>
-      ${preview || '<div class="message ok">This attachment is stored in Firebase Storage.</div>'}
+      ${preview || (a.downloadUrl ? '<div class="message ok">This file is ready to download.</div>' : '<div class="message ok">This is a training attachment. There is no downloadable file attached.</div>')}
       <div class="row">${actions}</div>
     </div>`, 'compact');
 
@@ -3493,7 +3453,7 @@ function removeOldAttachmentDataUrls(){
   if(!state || !state.mailboxes) return;
 
   Object.values(state.mailboxes).forEach(box => {
-    ['inbox', 'junk', 'deleted', 'sent'].forEach(folder => {
+    MAILBOX_FOLDERS.forEach(folder => {
       (box[folder] || []).forEach(mail => {
         (mail.attachments || []).forEach(att => {
           if(att.dataUrl){
@@ -3557,7 +3517,7 @@ function renderAdminMain(){
 }
 function renderStaffAccountsPage(main){
   const list=adminUsers('staff');
-  main.innerHTML=`<div class="stack"><div class="split"><div><h2 style="margin:0">Staff</h2><p class="muted">Manage staff accounts only. Use the separate Inbox and Calendar tabs for mailbox and calendar tools.</p></div><button id="addStaffBtn" class="btn btn-primary">Add staff</button></div><div class="panel table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Password</th><th>Status</th><th>Last login</th><th>Actions</th></tr></thead><tbody>${list.map(u=>`<tr><td>${esc(u.displayName)}</td><td>${esc(u.email)}</td><td>${esc(u.password)}</td><td>${u.active?'<span class="tag safe">Active</span>':'<span class="tag phishing">Inactive</span>'}</td><td>${esc(u.lastLogin || 'Never')}</td><td><div class="row"><button class="mini-btn" data-edit-staff="${u.id}">Edit</button><button class="btn-danger" data-delete-staff="${u.id}">Delete staff</button></div></td></tr>`).join('')}</tbody></table></div></div>`;
+  main.innerHTML=`<div class="stack"><div class="split"><div><h2 style="margin:0">Staff</h2><p class="muted">Manage staff accounts only. Use the separate Inbox and Calendar tabs for mailbox and calendar tools.</p></div><button id="addStaffBtn" class="btn btn-primary">Add staff</button></div><div class="panel table-wrap"><table><thead><tr><th>Name</th><th>Email</th><th>Password</th><th>Status</th><th>Last login</th><th>Actions</th></tr></thead><tbody>${list.map(u=>`<tr><td>${esc(u.displayName)}</td><td>${esc(u.email)}</td><td>${esc(u.password)}</td><td>${u.active?'<span class="tag safe">Active</span>':'<span class="tag phishing">Inactive</span>'}</td><td>${esc(u.lastLogin?formatDateTime(u.lastLogin):'Never')}</td><td><div class="row"><button class="mini-btn" data-edit-staff="${u.id}">Edit</button><button class="btn-danger" data-delete-staff="${u.id}">Delete staff</button></div></td></tr>`).join('')}</tbody></table></div></div>`;
   document.getElementById('addStaffBtn').onclick=()=>openUserModal('staff');
   document.querySelectorAll('[data-edit-staff]').forEach(b=>b.onclick=()=>openUserModal('staff',b.dataset.editStaff));
   document.querySelectorAll('[data-delete-staff]').forEach(b=>b.onclick=()=>confirmDeleteUser(b.dataset.deleteStaff,'staff'));
@@ -3643,7 +3603,7 @@ function renderCalendarAdminPage(main){
 
         <div class="calendar-mini-card">
           <div style="font-weight:800;margin-bottom:6px">Selected date</div>
-          <div class="muted">${anchor.toLocaleDateString([], {weekday:'long', day:'numeric', month:'long', year:'numeric'})}</div>
+          <div class="muted">${anchor.toLocaleDateString('en-GB', {weekday:'long', day:'numeric', month:'long', year:'numeric'})}</div>
           <div style="margin-top:12px">
             ${previewUserId && eventsForUserOnDate(previewUserId, anchor).length
               ? eventsForUserOnDate(previewUserId, anchor).map(ev=>`<button class="calendar-month-event calendar-event-open" data-event-id="${ev.id}">${esc(ev.startTime||'All day')} ${esc(ev.title)}</button>`).join('')
@@ -3685,12 +3645,12 @@ function renderDashboardPage(main, students, staff){
 }
 function renderSendPage(main){
   const groups=templateGroupCounts();
-  main.innerHTML=`<div class="stack"><div class="split"><div><h2 style="margin:0">Send Email</h2><p class="muted">Choose a simpler template send, compose a new message, or manage templates.</p></div></div>${sendEmailMode==='menu' ? `<div class="grid3"><button class="panel group-card" id="openSendTemplatePage"><div class="tag internal">Send From Template</div><h3 style="margin:0">Choose a library email</h3><div class="muted">Pick a template, make quick edits, and send it.</div></button><button class="panel group-card" id="openComposePage"><div class="tag safe">Compose Email</div><h3 style="margin:0">Write a custom email</h3><div class="muted">Write your own message and optionally save it as an automation.</div></button><button class="panel group-card" id="openTemplateManagerPage"><div class="tag spam">Template Library</div><h3 style="margin:0">Create and manage templates</h3><div class="muted">Build the shared master template bank with links, mail merge and attachments.</div></button></div><div class="panel"><div class="split"><div><h3 style="margin:0">Existing automations</h3><div class="muted">Run, edit, or review saved automations.</div></div><button id="runAutoNowBtn" class="btn-secondary">Run automations now</button></div><div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>Name</th><th>Type</th><th>Students</th><th>Frequency</th><th>Qty</th><th>Status</th></tr></thead><tbody>${state.automations.length?state.automations.map(a=>`<tr><td>${esc(a.name)}</td><td>${esc(a.kind==='custom'?'Custom email':'Template')}</td><td>${esc((a.studentIds||[]).map(id=>getUser(id)?.displayName||'').join(', '))}</td><td>${esc(a.frequency)}</td><td>${esc(a.quantity)}</td><td>${a.active?'<span class="tag safe">Active</span>':'<span class="tag phishing">Paused</span>'}</td></tr>`).join(''):'<tr><td colspan="6" class="muted">No automations yet.</td></tr>'}</tbody></table></div></div>`:''}${sendEmailMode==='template' ? `<div class="panel"><div class="split"><div><h3 style="margin:0">Send From Template</h3><div class="muted">The template is already written. Make quick changes here if needed, then send it.</div></div><button id="sendBackBtn" class="btn-secondary">Back</button></div><div class="grid2" style="margin-top:14px"><div class="stack"><div class="field"><label>Template group</label><select id="sendPageGroup">${groups.map(g=>`<option value="${esc(g.group)}">${esc(g.group)}</option>`).join('')}</select></div><div class="field"><label>Template</label><select id="sendPageTemplate"></select></div><div class="field"><label>Subject</label><input id="sendPageSubject" type="text"></div><div class="field"><label>Preview text</label><input id="sendPagePreviewText" type="text"></div><div class="field"><label>Body</label><textarea id="sendPageBody" style="min-height:240px"></textarea></div></div><div class="stack"><div class="field"><label>Choose class</label><select id="sendPageClass"><option value="">Choose a class</option>${state.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div><div class="field"><label>Who should receive it?</label><div class="row"><label class="selector-item" style="flex:1"><input type="radio" name="sendPageMode" value="class" checked><div><div>Whole class</div><small>Send to all students in this class.</small></div></label><label class="selector-item" style="flex:1"><input type="radio" name="sendPageMode" value="selected"><div><div>Selected students</div><small>Reveal the list only when needed.</small></div></label></div></div><div id="sendPageStudentsWrap" class="field hidden"><label>Select students</label><div id="sendPageStudents" class="selector-list"></div></div><div class="field"><label>Destination folder</label><select id="sendPageFolder"><option value="inbox">Inbox</option><option value="junk">Junk Email</option><option value="deleted">Deleted Items</option></select></div><div class="field"><label>Type filenames manually</label><input id="sendPageAttachments" type="text" placeholder="e.g. worksheet.pdf, letter.docx"></div><div class="field"><label>Attach files</label><input id="sendPageFiles" type="file" multiple></div>${attachmentSummaryHtml('sendPageFileSummary')}<label class="selector-item"><input id="sendPageAutomationToggle" type="checkbox"><div><div>Make this an automation</div><small>Instead of sending once, save it to run automatically.</small></div></label><div id="sendPageAutomationFields" class="stack hidden" style="margin-top:14px"><div class="field"><label>Automation name</label><input id="sendPageAutoName" type="text" placeholder="Daily template send"></div><div class="field"><label>Frequency</label><select id="sendPageFrequency"><option>Daily</option><option>Weekdays</option><option>Weekly</option></select></div><div class="field"><label>Quantity</label><input id="sendPageQuantity" type="number" min="1" value="1"></div></div><div class="template-preview-box" id="sendPagePreview"></div><div class="row" style="margin-top:14px"><button id="sendPageSubmit" class="btn btn-primary">Send template</button><button id="sendPageSaveAutomation" class="btn-secondary hidden">Save automation</button></div><div id="sendPageMsg"></div></div></div></div>`:''}${sendEmailMode==='compose' ? `<div class="panel"><div class="split"><div><h3 style="margin:0">Compose Email</h3><div class="muted">Full page editor so the message is easier to read and write.</div></div><button id="sendBackBtn" class="btn-secondary">Back</button></div><div class="grid2" style="margin-top:14px"><div><div class="field"><label>From account</label><select id="composePageSender">${state.users.filter(u=>u.role==='teacher'||u.role==='staff').map(u=>`<option value="${u.id}">${esc(u.displayName)} (${esc(u.email)})</option>`).join('')}</select></div><div class="field"><label>Subject</label><input id="composePageSubject" type="text"></div><div class="field"><label>Message</label><textarea id="composePageBody" style="min-height:260px"></textarea></div><div class="field"><label>Type filenames manually</label><input id="composePageAttachments" type="text" placeholder="e.g. rota.docx, reminder.pdf"></div><div class="field"><label>Attach files</label><input id="composePageFiles" type="file" multiple></div>${attachmentSummaryHtml('composePageFileSummary')}</div><div><div class="field"><label>Choose class</label><select id="composePageClass"><option value="">Choose a class</option>${state.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div><div class="field"><label>Who should receive it?</label><div class="row"><label class="selector-item" style="flex:1"><input type="radio" name="composePageMode" value="class" checked><div><div>Whole class</div><small>Send to everyone in the class.</small></div></label><label class="selector-item" style="flex:1"><input type="radio" name="composePageMode" value="selected"><div><div>Selected students</div><small>Reveal students only when needed.</small></div></label></div></div><div id="composePageStudentsWrap" class="field hidden"><label>Select students</label><div id="composePageStudents" class="selector-list"></div></div><div class="field"><label>Destination folder</label><select id="composePageFolder"><option value="inbox">Inbox</option><option value="junk">Junk Email</option><option value="deleted">Deleted Items</option></select></div><label class="selector-item"><input id="composePageAutomationToggle" type="checkbox"><div><div>Make this an automation</div><small>Save this custom email to run automatically.</small></div></label><div id="composePageAutomationFields" class="stack hidden" style="margin-top:14px"><div class="field"><label>Automation name</label><input id="composePageAutoName" type="text" placeholder="Weekly reminder"></div><div class="field"><label>Frequency</label><select id="composePageFrequency"><option>Daily</option><option>Weekdays</option><option>Weekly</option></select></div><div class="field"><label>Quantity</label><input id="composePageQuantity" type="number" min="1" value="1"></div></div><div class="row" style="margin-top:14px"><button id="composePageSubmit" class="btn btn-primary">Send email</button><button id="composePageSaveAutomation" class="btn-secondary hidden">Save automation</button></div><div id="composePageMsg"></div></div></div></div>`:''}${sendEmailMode==='manage' ? renderTemplateManagerPageHtml() : ''}</div>`;
-  const back=document.getElementById('sendBackBtn'); if(back) back.onclick=()=>{ sendEmailMode='menu'; renderAdmin(); };
+  main.innerHTML=`<div class="stack"><div class="split"><div><h2 style="margin:0">Send Email</h2><p class="muted">Choose a simpler template send, compose a new message, or manage templates.</p></div></div>${sendEmailMode==='menu' ? `<div class="grid3"><button class="panel group-card" id="openSendTemplatePage"><div class="tag internal">Send From Template</div><h3 style="margin:0">Choose a library email</h3><div class="muted">Pick a template, make quick edits, and send it.</div></button><button class="panel group-card" id="openComposePage"><div class="tag safe">Compose Email</div><h3 style="margin:0">Write a custom email</h3><div class="muted">Write your own message and optionally save it as an automation.</div></button><button class="panel group-card" id="openTemplateManagerPage"><div class="tag spam">Template Library</div><h3 style="margin:0">Create and manage templates</h3><div class="muted">Build the shared master template bank with links, mail merge and attachments.</div></button></div><div class="panel"><div class="split"><div><h3 style="margin:0">Existing automations</h3><div class="muted">Scheduled sends are checked automatically when the Teacher account signs in. Use Run now to test them immediately.</div></div><button id="runAutoNowBtn" class="btn-secondary">Run now</button></div><div class="table-wrap" style="margin-top:14px"><table><thead><tr><th>Name</th><th>Type</th><th>Students</th><th>Frequency</th><th>Qty</th><th>Status</th></tr></thead><tbody>${state.automations.length?state.automations.map(a=>`<tr><td>${esc(a.name)}</td><td>${esc(a.kind==='custom'?'Custom email':'Template')}</td><td>${esc((a.studentIds||[]).map(id=>getUser(id)?.displayName||'').join(', '))}</td><td>${esc(a.frequency)}</td><td>${esc(a.quantity)}</td><td>${a.active?'<span class="tag safe">Active</span>':'<span class="tag phishing">Paused</span>'}</td></tr>`).join(''):'<tr><td colspan="6" class="muted">No automations yet.</td></tr>'}</tbody></table></div></div>`:''}${sendEmailMode==='template' ? `<div class="panel"><div class="split"><div><h3 style="margin:0">Send From Template</h3><div class="muted">The template is already written. Make quick changes here if needed, then send it.</div></div><button id="sendBackBtn" class="btn-secondary">Back</button></div><div class="grid2" style="margin-top:14px"><div class="stack"><div class="field"><label>Template group</label><select id="sendPageGroup">${groups.map(g=>`<option value="${esc(g.group)}">${esc(g.group)}</option>`).join('')}</select></div><div class="field"><label>Template</label><select id="sendPageTemplate"></select></div><div class="field"><label>Subject</label><input id="sendPageSubject" type="text"></div><div class="field"><label>Preview text</label><input id="sendPagePreviewText" type="text"></div><div class="field"><label>Body</label><textarea id="sendPageBody" style="min-height:240px"></textarea></div></div><div class="stack"><div class="field"><label>Choose class</label><select id="sendPageClass"><option value="">Choose a class</option>${state.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div><div class="field"><label>Who should receive it?</label><div class="row"><label class="selector-item" style="flex:1"><input type="radio" name="sendPageMode" value="class" checked><div><div>Whole class</div><small>Send to all students in this class.</small></div></label><label class="selector-item" style="flex:1"><input type="radio" name="sendPageMode" value="selected"><div><div>Selected students</div><small>Reveal the list only when needed.</small></div></label></div></div><div id="sendPageStudentsWrap" class="field hidden"><label>Select students</label><div id="sendPageStudents" class="selector-list"></div></div><div class="field"><label>Destination folder</label><select id="sendPageFolder"><option value="inbox">Inbox</option><option value="junk">Junk Email</option><option value="deleted">Deleted Items</option></select></div><div class="field"><label>Type filenames manually</label><input id="sendPageAttachments" type="text" placeholder="e.g. worksheet.pdf, letter.docx"></div><div class="field"><label>Attach files</label><input id="sendPageFiles" type="file" multiple></div>${attachmentSummaryHtml('sendPageFileSummary')}<label class="selector-item"><input id="sendPageAutomationToggle" type="checkbox"><div><div>Make this an automation</div><small>Instead of sending once, save it to run automatically.</small></div></label><div id="sendPageAutomationFields" class="stack hidden" style="margin-top:14px"><div class="field"><label>Automation name</label><input id="sendPageAutoName" type="text" placeholder="Daily template send"></div><div class="field"><label>Frequency</label><select id="sendPageFrequency"><option>Daily</option><option>Weekdays</option><option>Weekly</option></select></div><div class="field"><label>Quantity</label><input id="sendPageQuantity" type="number" min="1" value="1"></div></div><div class="template-preview-box" id="sendPagePreview"></div><div class="row" style="margin-top:14px"><button id="sendPageSubmit" class="btn btn-primary">Send template</button><button id="sendPageSaveAutomation" class="btn-secondary hidden">Save automation</button></div><div id="sendPageMsg"></div></div></div></div>`:''}${sendEmailMode==='compose' ? `<div class="panel"><div class="split"><div><h3 style="margin:0">Compose Email</h3><div class="muted">Full page editor so the message is easier to read and write.</div></div><button id="sendBackBtn" class="btn-secondary">Back</button></div><div class="grid2" style="margin-top:14px"><div><div class="field"><label>From account</label><select id="composePageSender">${state.users.filter(u=>u.role==='teacher'||u.role==='staff').map(u=>`<option value="${u.id}">${esc(u.displayName)} (${esc(u.email)})</option>`).join('')}</select></div><div class="field"><label>Subject</label><input id="composePageSubject" type="text"></div><div class="field"><label>Message</label><textarea id="composePageBody" style="min-height:260px"></textarea></div><div class="field"><label>Type filenames manually</label><input id="composePageAttachments" type="text" placeholder="e.g. rota.docx, reminder.pdf"></div><div class="field"><label>Attach files</label><input id="composePageFiles" type="file" multiple></div>${attachmentSummaryHtml('composePageFileSummary')}</div><div><div class="field"><label>Choose class</label><select id="composePageClass"><option value="">Choose a class</option>${state.classes.map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select></div><div class="field"><label>Who should receive it?</label><div class="row"><label class="selector-item" style="flex:1"><input type="radio" name="composePageMode" value="class" checked><div><div>Whole class</div><small>Send to everyone in the class.</small></div></label><label class="selector-item" style="flex:1"><input type="radio" name="composePageMode" value="selected"><div><div>Selected students</div><small>Reveal students only when needed.</small></div></label></div></div><div id="composePageStudentsWrap" class="field hidden"><label>Select students</label><div id="composePageStudents" class="selector-list"></div></div><div class="field"><label>Destination folder</label><select id="composePageFolder"><option value="inbox">Inbox</option><option value="junk">Junk Email</option><option value="deleted">Deleted Items</option></select></div><label class="selector-item"><input id="composePageAutomationToggle" type="checkbox"><div><div>Make this an automation</div><small>Save this custom email to run automatically.</small></div></label><div id="composePageAutomationFields" class="stack hidden" style="margin-top:14px"><div class="field"><label>Automation name</label><input id="composePageAutoName" type="text" placeholder="Weekly reminder"></div><div class="field"><label>Frequency</label><select id="composePageFrequency"><option>Daily</option><option>Weekdays</option><option>Weekly</option></select></div><div class="field"><label>Quantity</label><input id="composePageQuantity" type="number" min="1" value="1"></div></div><div class="row" style="margin-top:14px"><button id="composePageSubmit" class="btn btn-primary">Send email</button><button id="composePageSaveAutomation" class="btn-secondary hidden">Save automation</button></div><div id="composePageMsg"></div></div></div></div>`:''}${sendEmailMode==='manage' ? renderTemplateManagerPageHtml() : ''}</div>`;
+  const back=document.getElementById('sendBackBtn'); if(back) back.onclick=()=>{ if(templateManagerUnsaved && !confirm('Discard unsaved template changes?')) return; templateManagerUnsaved=false; sendEmailMode='menu'; if(!flushDeferredRemoteState()) renderAdmin(); };
   const openT=document.getElementById('openSendTemplatePage'); if(openT) openT.onclick=()=>{ sendEmailMode='template'; renderAdmin(); };
   const openC=document.getElementById('openComposePage'); if(openC) openC.onclick=()=>{ sendEmailMode='compose'; renderAdmin(); };
   const openM=document.getElementById('openTemplateManagerPage'); if(openM) openM.onclick=()=>{ sendEmailMode='manage'; renderAdmin(); };
-  const run=document.getElementById('runAutoNowBtn'); if(run) run.onclick=()=>{ state.automations.forEach(a=>a.lastRun=''); processAutomations(true); saveState(); openModal('<h2>Automations run</h2><div class="message ok">All active automations have been run once for testing.</div><div class="row" style="margin-top:16px"><button id="closeAutoRun" class="btn-secondary">Close</button></div>', true); document.getElementById('closeAutoRun').onclick=closeModal; };
+  const run=document.getElementById('runAutoNowBtn'); if(run) run.onclick=()=>{ state.automations.forEach(a=>a.lastRun=''); processAutomations(true); saveState(); openModal('<h2>Automations run</h2><div class="message ok">All active automations have been run once for testing.</div><div class="row" style="margin-top:16px"><button id="closeAutoRun" class="btn-secondary">Close</button></div>', 'narrow'); document.getElementById('closeAutoRun').onclick=closeModal; };
   if(sendEmailMode==='template') bindSendTemplatePage();
   if(sendEmailMode==='compose') bindComposePage();
   if(sendEmailMode==='manage') bindTemplateManagerPage();
@@ -4233,6 +4193,7 @@ function normaliseCalendarEvent(ev){
   if(!ev) return null;
   return {
     id: ev.id || uid('evt'),
+    seriesId: ev.seriesId || '',
     title: ev.title || ev.name || 'Untitled event',
     date: ev.date || ev.day || '',
     startTime: ev.startTime || ev.time || '',
@@ -4248,7 +4209,7 @@ function studentEventsOn(dateObj){
 }
 
 function prettyDateLong(dateObj){
-  return dateObj.toLocaleDateString([], {weekday:'long', day:'numeric', month:'long', year:'numeric'});
+  return dateObj.toLocaleDateString('en-GB', {weekday:'long', day:'numeric', month:'long', year:'numeric'});
 }
 
 function studentTimeRowsHtml(dateObj){
@@ -4257,7 +4218,7 @@ function studentTimeRowsHtml(dateObj){
 
   for(let h=6; h<=21; h++){
     const hh=String(h).padStart(2,'0');
-    const label=new Date(`2000-01-01T${hh}:00:00`).toLocaleTimeString([], {hour:'numeric', minute:'2-digit'});
+    const label=new Date(`2000-01-01T${hh}:00:00`).toLocaleTimeString('en-GB', {hour:'numeric', minute:'2-digit'});
     const slotEvents=events.filter(ev=>((ev.startTime||'').slice(0,2)===hh));
     rows += `<div class="student-time-row"><div class="student-time-label">${esc(label)}</div><div class="student-slot" data-student-slot="${localDateKey(dateObj)}|${hh}:00"><div class="student-slot-note">Click to add an event</div>${slotEvents.map(ev=>`<button class="student-event-chip" data-student-event="${ev.id}">${esc(ev.title)}<small>${esc(ev.startTime||'All day')}${ev.endTime?` - ${esc(ev.endTime)}`:''}</small></button>`).join('')}</div></div>`;
   }
@@ -4271,7 +4232,7 @@ function studentTimeRowsHtml(dateObj){
 }
 function renderCalendarPanel(){
   const anchor=getAnchorDate(studentCalendarAnchor || localDateKey(new Date()));
-  const dayLabel=anchor.toLocaleDateString([], {weekday:'long', day:'numeric', month:'long', year:'numeric'});
+  const dayLabel=anchor.toLocaleDateString('en-GB', {weekday:'long', day:'numeric', month:'long', year:'numeric'});
 
   return `<div class="calendar-outlook">
     <div class="calendar-outlook-top">
@@ -4403,126 +4364,48 @@ document.getElementById('saveStudentEvtBtn').onclick=()=>{
   const del=document.getElementById('deleteStudentEvtBtn');
   if(del) del.onclick=()=>{ state.events[currentUserId]=(state.events[currentUserId]||[]).filter(ev=>ev.id!==existing.id); saveState(); closeModal(); renderMailbox(); };
 }
+function draftRecipientLabel(mail){
+  const recipients=(mail.toRecipients||[]).map(r=>r.displayName||r.email).filter(Boolean);
+  if(recipients.length) return recipients.join(', ');
+  const user=getUser(mail.recipientId);
+  return user?.displayName || mail.recipientName || 'No recipient';
+}
+function mailListPrimaryText(mail){
+  if(mailFolder==='sent') return `To: ${getUser(mail.recipientId)?.displayName || mail.recipientName || mail.recipientEmail || 'Recipient'}`;
+  if(mailFolder==='drafts') return `Draft to: ${draftRecipientLabel(mail)}`;
+  return mail.senderName || 'Sender';
+}
 function renderMailList(){
-  document.querySelectorAll('.folder-btn').forEach(btn=>btn.classList.toggle('active', btn.dataset.folder===mailFolder));
-const titles={
-  inbox:'Inbox',
-  sent:'Sent Items',
-  drafts:'Drafts',
-  junk:'Junk Email',
-  deleted:'Deleted Items',
-  templates:'Templates',
-  calendar:'Calendar'
-};
-  document.getElementById('folderTitle').textContent=titles[mailFolder];
+  document.querySelectorAll('.folder-btn').forEach(btn=>btn.classList.toggle('active',btn.dataset.folder===mailFolder));
+  const titles={inbox:'Inbox',archive:'Archive',sent:'Sent Items',drafts:'Drafts',junk:'Junk Email',deleted:'Deleted Items',templates:'Templates',calendar:'Calendar'};
+  document.getElementById('folderTitle').textContent=titles[mailFolder]||'Inbox';
   const list=document.getElementById('mailList');
-  if(isStaffUser() && mailFolder==='templates'){
-    renderStaffTemplateList();
-    return;
-  }
-
-  if(isStaffUser() && mailFolder==='calendar'){
-    document.getElementById('folderTitle').textContent='Calendar';
-    document.getElementById('messageCount').textContent='Planner';
-    list.innerHTML = renderStaffMailboxCalendarList();
-    bindStaffMailboxCalendar();
-    return;
-  }
+  if(isStaffUser()&&mailFolder==='templates'){renderStaffTemplateList();return;}
+  if(isStaffUser()&&mailFolder==='calendar'){document.getElementById('folderTitle').textContent='Calendar';document.getElementById('messageCount').textContent='Planner';list.innerHTML=renderStaffMailboxCalendarList();bindStaffMailboxCalendar();return;}
   if(mailFolder==='calendar'){
-    const anchor=studentCalendarCurrentDate();
-    const monthBase=studentCalendarMonthBase();
-    const monthLabel=formatMonthLabel(monthBase);
-    const gridStart=startOfWeek(monthBase);
-    const days=[];
-    for(let i=0;i<42;i++){
-      const d=new Date(gridStart);
-      d.setDate(gridStart.getDate()+i);
-      days.push(d);
-    }
-
+    const anchor=studentCalendarCurrentDate(),monthBase=studentCalendarMonthBase(),monthLabel=formatMonthLabel(monthBase),gridStart=startOfWeek(monthBase),days=[];
+    for(let i=0;i<42;i++){const d=new Date(gridStart);d.setDate(gridStart.getDate()+i);days.push(d);}
     document.getElementById('messageCount').textContent=(state.events[currentUserId]||[]).length;
-    list.innerHTML=`<div class="student-calendar-side" style="padding:16px">
-      <div class="student-calendar-tools">
-        <button id="studentNewEventBtn" class="btn btn-primary">New event</button>
-      </div>
-
-      <div class="student-mini-month">
-        <div class="student-mini-head">
-          <button id="studentMiniPrevMonth" class="btn-secondary">◀</button>
-          <strong>${esc(monthLabel)}</strong>
-          <button id="studentMiniNextMonth" class="btn-secondary">▶</button>
-        </div>
-
-        <div class="student-mini-grid">
-          ${['M','T','W','T','F','S','S'].map(h=>`<div class="head">${h}</div>`).join('')}
-          ${days.map(d=>`<button class="student-mini-date ${sameDate(d,anchor)?'is-selected':''} ${d.getMonth()!==monthBase.getMonth()?'is-muted':''} ${sameDate(d,getAnchorDate(localDateKey(new Date())))?'is-today':''}" data-student-date="${localDateKey(d)}">${d.getDate()}</button>`).join('')}
-        </div>
-      </div>
-
-      <div class="student-selected-box">
-        <div style="font-weight:800;margin-bottom:6px">Selected date</div>
-        <div class="muted">${esc(prettyDateLong(anchor))}</div>
-        <div style="margin-top:12px">
-          ${studentEventsOn(anchor).length
-            ? studentEventsOn(anchor).map(ev=>`<button class="student-event-chip" data-student-event="${ev.id}">${esc(ev.title)}<small>${esc(ev.startTime||'All day')}${ev.endTime?` - ${esc(ev.endTime)}`:''}</small></button>`).join('')
-            : '<div class="muted">No events on this date.</div>'}
-        </div>
-      </div>
-    </div>`;
-    bindStudentCalendarPanel(list);
-    return;
+    list.innerHTML=`<div class="student-calendar-side" style="padding:16px"><div class="student-calendar-tools"><button id="studentNewEventBtn" class="btn btn-primary">New event</button></div><div class="student-mini-month"><div class="student-mini-head"><button id="studentMiniPrevMonth" class="btn-secondary">◀</button><strong>${esc(monthLabel)}</strong><button id="studentMiniNextMonth" class="btn-secondary">▶</button></div><div class="student-mini-grid">${['M','T','W','T','F','S','S'].map(h=>`<div class="head">${h}</div>`).join('')}${days.map(d=>`<button class="student-mini-date ${sameDate(d,anchor)?'is-selected':''} ${d.getMonth()!==monthBase.getMonth()?'is-muted':''} ${sameDate(d,getAnchorDate(localDateKey(new Date())))?'is-today':''}" data-student-date="${localDateKey(d)}">${d.getDate()}</button>`).join('')}</div></div><div class="student-selected-box"><div style="font-weight:800;margin-bottom:6px">Selected date</div><div class="muted">${esc(prettyDateLong(anchor))}</div><div style="margin-top:12px">${studentEventsOn(anchor).length?studentEventsOn(anchor).map(ev=>`<button class="student-event-chip" data-student-event="${ev.id}">${esc(ev.title)}<small>${esc(ev.startTime||'All day')}${ev.endTime?` - ${esc(ev.endTime)}`:''}</small></button>`).join(''):'<div class="muted">No events on this date.</div>'}</div></div></div>`;
+    bindStudentCalendarPanel(list);return;
   }
 
   const items=currentMailItems();
   document.getElementById('messageCount').textContent=items.length;
-  if(!selectedMailId && items[0]) selectedMailId=items[0].id;
-  if(!items.find(i=>i.id===selectedMailId)) selectedMailId=items[0]?.id||null;
+  if(!selectedMailId&&items[0])selectedMailId=items[0].id;
+  if(!items.find(i=>i.id===selectedMailId))selectedMailId=items[0]?.id||null;
+  list.innerHTML=items.length?items.map(m=>`<button class="mail-item ${m.id===selectedMailId?'active':''}" data-mail="${m.id}"><div class="mail-item-row"><div class="mail-list-avatar">${esc(mailAvatarText(m))}</div><div class="mail-item-content"><div class="mail-top"><div style="min-width:0"><div class="mail-from">${m.read?'':'<span class="dot"></span>'}<span class="truncate ${m.read?'read':'unread'}">${esc(mailListPrimaryText(m))}</span>${m.flagged?'<span style="color:#f59e0b">⚑</span>':''}${m.reported?'<span title="Reported suspicious">⚠</span>':''}</div><div class="truncate ${m.read?'read':'unread'}">${esc(m.subject)}</div></div><span class="time">${esc(m.timeLabel||formatMailDate(m.updatedAt||m.sentAt))}</span></div><div class="preview truncate">${esc(m.preview||'')}</div></div></div></button>`).join(''):'<div class="panel" style="margin:16px">No messages in this folder.</div>';
 
-list.innerHTML = items.length
-  ? items.map(m=>`
-    <button class="mail-item ${m.id===selectedMailId?'active':''}" data-mail="${m.id}">
-      <div class="mail-item-row">
-        <div class="mail-list-avatar">${esc(mailAvatarText(m))}</div>
-
-        <div class="mail-item-content">
-          <div class="mail-top">
-            <div style="min-width:0">
-              <div class="mail-from">
-                ${m.read ? '' : '<span class="dot"></span>'}
-                <span class="truncate ${m.read?'read':'unread'}">${esc(m.senderName)}</span>
-                ${m.flagged ? '<span style="color:#f59e0b">⚑</span>' : ''}
-              </div>
-              <div class="truncate ${m.read?'read':'unread'}">${esc(m.subject)}</div>
-            </div>
-            <span class="time">${esc(m.timeLabel)}</span>
-          </div>
-
-          <div class="preview truncate">${esc(m.preview)}</div>
-        </div>
-      </div>
-    </button>
-  `).join('')
-  : '<div class="panel" style="margin:16px">No messages in this folder.</div>';
-
-document.querySelectorAll('[data-mail]').forEach(b=>b.onclick=()=>{
-  selectedMailId = b.dataset.mail;
-
-  // Important: close compose mode when opening an existing message
-  composeMode = null;
-  showHint = false;
-
-  const m = currentMailItems().find(x => x.id === selectedMailId);
-  if(m) m.read = true;
-
-  saveState();
-
-  if(isStudentMobile()){
-    mobileStudentTab = 'mail';
-    mobileStudentView = 'detail';
-  }
-
-  renderMailbox();
-});
+  list.querySelectorAll('[data-mail]').forEach(b=>b.onclick=()=>{
+    if(composeMode&&!closeComposeEditor())return;
+    selectedMailId=b.dataset.mail;
+    const m=currentMailItems().find(x=>x.id===selectedMailId);
+    if(mailFolder==='drafts'&&m){beginDraftCompose(m);if(isStudentMobile()){mobileStudentTab='mail';mobileStudentView='detail';}renderMailbox();return;}
+    composeMode=null;showHint=false;
+    if(m&&!m.read){m.read=true;saveState();}
+    if(isStudentMobile()){mobileStudentTab='mail';mobileStudentView='detail';}
+    renderMailbox();
+  });
 }
 function isSharedTemplate(tpl){
   if(!tpl) return false;
@@ -4695,84 +4578,48 @@ function renderStaffTemplateReader(){
     if(isDraft) staffTemplateDraft=null;
     root.dataset.editing=''; root.dataset.templateDirty='0';
     if(isDraft) selectedTemplateId=visibleTemplatesForCurrentUser()[0]?.id || '';
-    renderMailbox();
+    if(!flushDeferredRemoteState()) renderMailbox();
   };
 }
 function renderMailReader(){
   const root=document.getElementById('readerInner');
+  if(isStaffUser()&&mailFolder==='templates'){renderStaffTemplateReader();return;}
+  if(isStaffUser()&&mailFolder==='calendar'){root.innerHTML=renderStaffMailboxCalendarReader();bindStaffMailboxCalendarReader();return;}
+  if(mailFolder==='calendar'){root.innerHTML=renderCalendarPanel();bindStudentCalendarPanel(root);return;}
 
-  if(isStaffUser() && mailFolder==='templates'){
-    renderStaffTemplateReader();
+  if(['new','draft'].includes(composeMode)){
+    root.innerHTML=renderComposeReply(composeMode==='draft'?currentMail():null);
+    restoreComposeDraft();
+    bindComposeAddressField(root);
+    document.getElementById('closeComposeBtn').onclick=()=>{if(closeComposeEditor()){if(!flushDeferredRemoteState())renderMailbox();}};
+    document.getElementById('sendMsgBtn').onclick=sendCurrentMessage;
+    const draftBtn=document.getElementById('saveDraftBtn');if(draftBtn)draftBtn.onclick=saveCurrentDraft;
     return;
   }
-
-  if(isStaffUser() && mailFolder==='calendar'){
-    root.innerHTML = renderStaffMailboxCalendarReader();
-    bindStaffMailboxCalendarReader();
-    return;
-  }
-
-  if(mailFolder==='calendar'){
-    root.innerHTML=renderCalendarPanel();
-    bindStudentCalendarPanel(root);
-    return;
-  }
-
-if(composeMode==='new'){
-  root.innerHTML=renderComposeReply(null);
-
-  restoreComposeDraft();
-
-  const c=document.getElementById('closeComposeBtn');
-  if(c) c.onclick=()=>{
-    clearComposeDraft();
-    composeMode=null;
-    renderMailReader();
-  };
-
-  const s=document.getElementById('sendMsgBtn');
-  if(s) s.onclick=sendCurrentMessage;
-const draftBtn=document.getElementById('saveDraftBtn');
-if(draftBtn) draftBtn.onclick=saveCurrentDraft;
-  bindComposeAddressField(root);
-
-  return;
-}
 
   const mail=currentMail();
-  if(!mail){
-    root.innerHTML='<div class="panel">Select an email to start.</div>';
-    return;
-  }
-
+  if(!mail){root.innerHTML='<div class="panel">Select an email to start.</div>';return;}
   const badge=mail.category==='phishing'?'phishing':mail.category==='spam'?'spam':mail.category==='internal'?'internal':'safe';
-  const badgeLabel=mail.category==='phishing'?'Suspicious training email':mail.category==='spam'?'Junk / spam':mail.category==='internal'?'Internal message':'Standard message';
-
-  root.innerHTML=`<div class="subject-line">
-    <div>
-      <h1>${esc(mail.subject)}</h1>
-      <div class="from-box ${showHint && mail.hints.some(h=>h.target==='from')?'hinted':''}">
-        <strong>From:</strong> ${esc(mail.senderName)} &lt;${esc(mail.senderEmail)}&gt;
-        &nbsp; <span class="muted">${esc(mail.sentAt)}</span>
-      </div>
-    </div>
-    <div class="tag ${badge}">${badgeLabel}</div>
-  </div>
-  ${showHint?`<div class="hint-card"><h3>Things to check</h3><ul>${mail.hints.map(h=>`<li>${esc(h.label)}</li>`).join('')}</ul></div>`:''}
-${composeMode?renderComposeReply(mail):''}
-  <div class="mail-body ${showHint && mail.hints.some(h=>h.target==='body')?'hinted':''}">${bodyHtml(mail)}</div>
-  ${mail.attachments?.length?`<div class="attachment-wrap">${mail.attachments.map(a=>`<div class="attachment"><div><strong>${esc(a.filename)}</strong><div class="muted">${esc(a.filetype)} • ${esc(a.size)}</div></div><button class="btn-secondary" data-open-att="${a.id}">Open</button></div>`).join('')}</div>`:''}
-  ${(mail.replies||[]).map(r=>`<div class="reply-card"><div class="reply-head"><strong>You ${r.type==='forward'?'forwarded':'replied'}</strong><span>${esc(r.time)}</span></div><div style="white-space:pre-wrap;line-height:1.8">${autoLinkText(r.text)}</div></div>`).join('')}
-  `;
-
+  const badgeLabel=mail.reported?'Reported suspicious':mail.category==='phishing'?'Suspicious training email':mail.category==='spam'?'Junk / spam':mail.category==='internal'?'Internal message':'Standard message';
+  const sentView=mailFolder==='sent';
+  const addressLine=sentView
+    ? `<strong>To:</strong> ${esc(getUser(mail.recipientId)?.displayName||mail.recipientName||'Recipient')} &lt;${esc(getUser(mail.recipientId)?.email||mail.recipientEmail||'')}&gt;`
+    : `<strong>From:</strong> ${esc(mail.senderName)} &lt;${esc(mail.senderEmail)}&gt;`;
+  root.innerHTML=`<div class="subject-line"><div><h1>${esc(mail.subject)}</h1><div class="from-box ${showHint&&mail.hints?.some(h=>h.target==='from')?'hinted':''}">${addressLine}&nbsp; <span class="muted">${esc(formatDateTime(mail.sentAt))}</span></div></div><div class="tag ${badge}">${esc(badgeLabel)}</div></div>
+    ${showHint?`<div class="hint-card"><h3>Things to check</h3><ul>${(mail.hints||[]).map(h=>`<li>${esc(h.label)}</li>`).join('')}</ul></div>`:''}
+    ${composeMode?renderComposeReply(mail):''}
+    <div class="mail-body ${showHint&&mail.hints?.some(h=>h.target==='body')?'hinted':''}">${bodyHtml(mail)}</div>
+    ${mail.attachments?.length?`<div class="attachment-wrap">${mail.attachments.map(a=>`<div class="attachment"><div><strong>${esc(a.filename)}</strong><div class="muted">${esc(a.filetype)} • ${esc(a.size)}</div></div><button class="btn-secondary" data-open-att="${a.id}">Open</button></div>`).join('')}</div>`:''}
+    ${(mail.replies||[]).map(r=>`<div class="reply-card"><div class="reply-head"><strong>You ${r.type==='forward'?'forwarded':'replied'}</strong><span>${esc(r.time||formatMailDate(r.sentAt))}</span></div><div style="white-space:pre-wrap;line-height:1.8">${autoLinkText(r.text)}</div></div>`).join('')}`;
   root.querySelectorAll('[data-link]').forEach(el=>el.onclick=()=>openFakePage(el.dataset.link));
-  root.querySelectorAll('[data-open-att]').forEach(el=>el.onclick=()=>openAttachment(mail, el.dataset.openAtt));
-
-  const c=document.getElementById('closeComposeBtn');
-  if(c) c.onclick=()=>{ composeMode=null; renderMailReader(); };
-
-  const s=document.getElementById('sendMsgBtn');
-  if(s) s.onclick=sendCurrentMessage;
+  root.querySelectorAll('[data-open-att]').forEach(el=>el.onclick=()=>openAttachment(mail,el.dataset.openAtt));
+  if(composeMode){
+    restoreComposeDraft();
+    if(['forward'].includes(composeMode)) bindComposeAddressField(root);
+    const c=document.getElementById('closeComposeBtn');if(c)c.onclick=()=>{if(closeComposeEditor()){if(!flushDeferredRemoteState())renderMailbox();}};
+    const send=document.getElementById('sendMsgBtn');if(send)send.onclick=sendCurrentMessage;
+    const draftBtn=document.getElementById('saveDraftBtn');if(draftBtn)draftBtn.onclick=saveCurrentDraft;
+  }
 }
 
 bindEvents();
