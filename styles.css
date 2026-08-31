@@ -982,3 +982,66 @@ button:disabled{
     min-height:70px;
   }
 }
+
+
+/* ===== Send From Template: full-width learner preview ===== */
+.send-template-preview-wrap{
+  margin-top:20px;
+  border:2px solid #cbd5e1;
+  border-radius:20px;
+  background:#f8fafc;
+  overflow:hidden;
+  box-shadow:0 8px 24px rgba(15,23,42,.06);
+}
+.send-template-preview-heading{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:16px;
+  padding:16px 18px;
+  border-bottom:1px solid #cbd5e1;
+  background:#eef4ff;
+}
+.send-template-preview-kicker{
+  display:block;
+  margin-bottom:3px;
+  font-size:11px;
+  font-weight:900;
+  letter-spacing:.13em;
+  text-transform:uppercase;
+  color:#2563eb;
+}
+.send-template-preview-heading h4{
+  margin:0;
+  font-size:18px;
+  color:#0f172a;
+}
+.send-template-preview-note{
+  color:var(--muted);
+  font-size:12px;
+  font-weight:700;
+  text-align:right;
+}
+.send-page-preview{
+  width:100%;
+  min-height:300px;
+  margin:0;
+  border:0;
+  border-radius:0;
+  padding:0;
+  background:#fff;
+  white-space:normal;
+}
+.send-page-preview .template-preview-email{
+  padding:24px 28px 30px;
+  max-width:none;
+  width:100%;
+}
+@media (max-width:920px){
+  .send-template-preview-heading{
+    align-items:flex-start;
+    flex-direction:column;
+  }
+  .send-template-preview-note{text-align:left}
+  .send-page-preview .template-preview-email{padding:20px}
+}
